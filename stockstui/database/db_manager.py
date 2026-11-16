@@ -1,6 +1,8 @@
-import sqlite3
+import functools
 import json
 import logging
+import sqlite3
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 from stockstui.utils import merge_price_data
@@ -15,6 +17,22 @@ CACHE_PRUNE_EXPIRY_SECONDS = 604800  # 7 days
 
 # Ticker info (exchange, name) changes very rarely. Cache it for a long time.
 INFO_CACHE_EXPIRY_SECONDS = 86400 * 30  # 30 days
+
+
+def _serialized(method):
+    """
+    Runs a write method under the instance's write lock.
+
+    The single sqlite3 connection is shared with background worker threads
+    (check_same_thread=False), so two transactions on it must not interleave.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class DbManager:
@@ -32,6 +50,7 @@ class DbManager:
         """
         self.db_path = db_path
         self.conn = None
+        self._write_lock = threading.RLock()
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             # Mypy has trouble with some sqlite3.connect overloads
@@ -195,6 +214,7 @@ class DbManager:
         logging.info(f"Loaded {len(loaded_data)} items from the persistent info cache.")
         return loaded_data
 
+    @_serialized
     def save_price_cache_to_db(self, cache_data: dict):
         """
         Saves the in-memory price cache to the database, merging field-level updates
@@ -246,6 +266,7 @@ class DbManager:
             if self.conn:
                 self.conn.rollback()
 
+    @_serialized
     def save_info_cache_to_db(self, cache_data: dict):
         """Saves the in-memory info cache to the database."""
         if not self.conn or not cache_data:
@@ -282,6 +303,7 @@ class DbManager:
 
     # --- Option Positions Methods ---
 
+    @_serialized
     def save_option_position(
         self, symbol: str, ticker: str, quantity: float, avg_cost: float
     ):
@@ -329,6 +351,7 @@ class DbManager:
             logging.error(f"Failed to get option position {symbol}: {e}")
             return None
 
+    @_serialized
     def delete_option_position(self, symbol: str):
         """Deletes an option position."""
         if not self.conn:
@@ -367,8 +390,11 @@ class DbManager:
             logging.error(f"Failed to get all option positions: {e}")
             return {}
 
+    @_serialized
     def close(self):
         """Closes the database connection if it's open."""
         if self.conn:
             self.conn.close()
+            # Later writes from a still-running worker become no-ops.
+            self.conn = None
             logging.info("Database connection closed.")

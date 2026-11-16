@@ -419,8 +419,7 @@ class StocksTUI(App):
         if self.market_status_timer:
             self.market_status_timer.stop()
 
-        self.db_manager.save_price_cache_to_db(market_provider.get_price_cache_state())
-        self.db_manager.save_info_cache_to_db(market_provider.get_info_cache_state())
+        self._persist_market_caches()
         self.db_manager.close()
 
         self.workers.cancel_all()
@@ -1308,8 +1307,21 @@ class StocksTUI(App):
             )
             if not get_current_worker().is_cancelled:
                 self.post_message(PriceDataUpdated(data, category))
+                self._persist_market_caches()
         except Exception as e:
             logging.error(f"Worker fetch_prices failed for category '{category}': {e}")
+
+    def _persist_market_caches(self) -> None:
+        """
+        Writes the in-memory price and info caches to the database.
+
+        Called after every successful fetch, not only on exit: the app is often
+        closed by killing its terminal (e.g. a scratchpad window), which skips
+        on_unmount. Without this the next launch starts with an empty cache and
+        shows a loading spinner until the full metadata fetch completes.
+        """
+        self.db_manager.save_price_cache_to_db(market_provider.get_price_cache_state().copy())
+        self.db_manager.save_info_cache_to_db(market_provider.get_info_cache_state().copy())
 
     @work(exclusive=True, thread=True)
     def fetch_market_status(self, calendar: str):
