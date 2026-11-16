@@ -463,6 +463,7 @@ class DebugView(Vertical):
             elif button_id == "debug-provider-report":
                 # Local read of the last recorded fetch outcome per capability;
                 # no network call, so buttons are re-enabled immediately.
+                dt.loading = False
                 dt.add_columns(
                     "Capability", "Provider", "Status", "Detail", "Updated", "Falls back to"
                 )

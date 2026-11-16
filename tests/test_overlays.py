@@ -86,6 +86,12 @@ class TestEarningsMarkers(unittest.TestCase):
         found = earnings_dates_in_range(frame, date(2026, 1, 1), date(2026, 1, 10))
         self.assertEqual(found, [])
 
+    def test_cached_iso_string_inside_range(self):
+        frame = _close_frame([100.0] * 5)
+        frame.attrs["earnings_date"] = "2026-01-03"
+        found = earnings_dates_in_range(frame, date(2026, 1, 1), date(2026, 1, 10))
+        self.assertEqual(found, [date(2026, 1, 3)])
+
     def test_no_cache_is_empty(self):
         frame = _close_frame([100.0] * 5)
         self.assertEqual(earnings_dates_in_range(frame, date(2026, 1, 1), date(2026, 1, 10)), [])
@@ -204,6 +210,247 @@ class TestHistoryViewKeybindings(unittest.IsolatedAsyncioTestCase):
             # Pressing again toggles off.
             await pilot.press("ctrl+m")
             self.assertFalse(chart._overlay_states["sma50"])
+
+
+class TestHistoryViewOverlayPersistence(unittest.IsolatedAsyncioTestCase):
+    async def test_sma50_refetch_and_overlay_state_preserved_across_remount(self):
+        from unittest.mock import MagicMock
+
+        from textual.app import App
+        from stockstui.ui.views.history_view import HistoryView
+        from stockstui.ui.widgets.history_chart import HistoryChart
+
+        short_data = _close_frame([100.0 + i for i in range(20)])
+
+        class HostApp(App):
+            theme_variables = {}
+            history_ticker = "AAPL"
+            config = MagicMock()
+            cli_overrides = {}
+            _history_period = "1mo"
+            _last_historical_data = short_data
+            _history_sort_column_key = None
+            _history_sort_reverse = False
+            fetch_historical_data = MagicMock()
+
+            def compose(self):
+                yield HistoryView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(HistoryView)
+            await pilot.pause()
+            app.fetch_historical_data.reset_mock()
+
+            view.query_one("#history-view-toggle").value = True
+            await pilot.pause()
+
+            await pilot.press("ctrl+t")
+            await pilot.press("ctrl+m")
+            await pilot.pause()
+
+            self.assertTrue(view._overlay_states["volume"])
+            self.assertTrue(view._overlay_states["sma50"])
+            app.fetch_historical_data.assert_called_once_with("AAPL", "6mo", "1d")
+
+            # Simulate wider data arriving and remounting HistoryChart.
+            app._last_historical_data = _close_frame([100.0 + i for i in range(130)])
+            app._history_period = "6mo"
+            await view._render_historical_data()
+            await pilot.pause()
+
+            remounted = view.query_one(HistoryChart)
+            self.assertTrue(remounted._overlay_states["sma50"])
+            self.assertTrue(remounted._overlay_states["volume"])
+
+    async def test_sma200_refetch_and_overlay_state_preserved_across_remount(self):
+        from unittest.mock import MagicMock
+
+        from textual.app import App
+        from stockstui.ui.views.history_view import HistoryView
+        from stockstui.ui.widgets.history_chart import HistoryChart
+
+        medium_data = _close_frame([100.0 + i for i in range(120)])
+
+        class HostApp(App):
+            theme_variables = {}
+            history_ticker = "AAPL"
+            config = MagicMock()
+            cli_overrides = {}
+            _history_period = "6mo"
+            _last_historical_data = medium_data
+            _history_sort_column_key = None
+            _history_sort_reverse = False
+            fetch_historical_data = MagicMock()
+
+            def compose(self):
+                yield HistoryView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(HistoryView)
+            await pilot.pause()
+            app.fetch_historical_data.reset_mock()
+
+            view.query_one("#history-view-toggle").value = True
+            await pilot.pause()
+
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+
+            self.assertTrue(view._overlay_states["sma200"])
+            app.fetch_historical_data.assert_called_once_with("AAPL", "1y", "1d")
+
+            # Simulate 1y data arriving and remounting HistoryChart.
+            app._last_historical_data = _close_frame([100.0 + i for i in range(250)])
+            app._history_period = "1y"
+            await view._render_historical_data()
+            await pilot.pause()
+
+            remounted = view.query_one(HistoryChart)
+            self.assertTrue(remounted._overlay_states["sma200"])
+
+    async def test_request_historical_data_widens_period_without_mounted_chart(self):
+        from unittest.mock import MagicMock
+
+        from textual.app import App
+        from stockstui.ui.views.history_view import HistoryView
+
+        class HostApp(App):
+            theme_variables = {}
+            history_ticker = "AAPL"
+            config = MagicMock()
+            cli_overrides = {}
+            _history_period = "1mo"
+            _last_historical_data = _close_frame([100.0, 101.0])
+            _history_sort_column_key = None
+            _history_sort_reverse = False
+            fetch_historical_data = MagicMock()
+
+            def compose(self):
+                yield HistoryView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(HistoryView)
+            await pilot.pause()
+            app.fetch_historical_data.reset_mock()
+
+            # View is still in table mode (no HistoryChart mounted).
+            view._overlay_states["sma50"] = True
+            view._request_historical_data()
+            app.fetch_historical_data.assert_called_once_with("AAPL", "6mo", "1d")
+
+            # Also verify 1D radio selection widens to 6mo daily bars with sma50 active.
+            app.fetch_historical_data.reset_mock()
+            radio_set = view.query_one("#history-range-select")
+            for btn in radio_set.query("RadioButton"):
+                btn.value = str(btn.label) == "1D"
+            await pilot.pause()
+            app.fetch_historical_data.reset_mock()
+            view._request_historical_data()
+            app.fetch_historical_data.assert_called_once_with("AAPL", "6mo", "1d")
+
+            app.fetch_historical_data.reset_mock()
+            view._overlay_states["sma200"] = True
+            view._request_historical_data()
+            app.fetch_historical_data.assert_called_once_with("AAPL", "1y", "1d")
+
+
+class TestHistoryEarningsAttachment(unittest.TestCase):
+    def setUp(self):
+        from stockstui.data_providers import market_provider
+
+        self._orig_price = dict(market_provider._price_cache)
+        self._orig_info = dict(market_provider._info_cache)
+        self._orig_cal = dict(market_provider._calendar_cache)
+        self._orig_db = market_provider._db_manager
+        market_provider._price_cache.clear()
+        market_provider._info_cache.clear()
+        market_provider._calendar_cache.clear()
+        market_provider.set_bar_store(None)
+
+    def tearDown(self):
+        from stockstui.data_providers import market_provider
+
+        market_provider._price_cache.clear()
+        market_provider._price_cache.update(self._orig_price)
+        market_provider._info_cache.clear()
+        market_provider._info_cache.update(self._orig_info)
+        market_provider._calendar_cache.clear()
+        market_provider._calendar_cache.update(self._orig_cal)
+        market_provider.set_bar_store(self._orig_db)
+
+    def test_network_path_attaches_earnings_from_price_cache(self):
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+        from stockstui.data_providers import market_provider
+
+        market_provider._info_cache["AAPL"] = {"currency": "USD"}
+        market_provider._price_cache["AAPL"] = {
+            "expiry": datetime.now(timezone.utc) + timedelta(hours=1),
+            "data": {"symbol": "AAPL", "next_earnings": "2026-01-15"},
+        }
+        raw = _close_frame([100.0, 101.0])
+        with patch("stockstui.data_providers.market_provider.yf.Ticker") as mock_tkr:
+            mock_tkr.return_value.history.return_value = raw
+            df = market_provider.get_historical_data("AAPL", "1mo", "1d")
+
+        self.assertEqual(df.attrs.get("earnings_date"), "2026-01-15")
+
+    def test_local_store_path_falls_back_to_calendar_cache(self):
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path
+        from stockstui.data_providers import market_provider
+        from stockstui.database.db_manager import DbManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dbm = DbManager(Path(tmpdir) / "bars.db")
+            try:
+                market_provider.set_bar_store(dbm)
+                recent_start = (datetime.now(timezone.utc) - timedelta(days=5)).strftime(
+                    "%Y-%m-%d"
+                )
+                idx = pd.to_datetime(
+                    [pd.Timestamp(recent_start) + pd.Timedelta(days=i) for i in range(3)]
+                ).tz_localize("UTC")
+                bars = pd.DataFrame(
+                    {
+                        "Open": [100.0, 101.0, 102.0],
+                        "High": [101.0, 102.0, 103.0],
+                        "Low": [99.0, 100.0, 101.0],
+                        "Close": [100.5, 101.5, 102.5],
+                        "Volume": [1000, 1001, 1002],
+                    },
+                    index=idx,
+                )
+                dbm.save_daily_bars("AAPL", bars)
+
+                market_provider._info_cache["AAPL"] = {"currency": "USD"}
+                market_provider._calendar_cache["AAPL"] = (
+                    datetime.now(timezone.utc),
+                    {"earnings_date": "2026-02-20"},
+                )
+
+                df = market_provider.get_historical_data("AAPL", "1mo", "1d")
+                self.assertEqual(df.attrs.get("source"), "local bar store")
+                self.assertEqual(df.attrs.get("earnings_date"), "2026-02-20")
+            finally:
+                market_provider.set_bar_store(None)
+                dbm.close()
+
+    def test_uncached_earnings_date_is_omitted(self):
+        from unittest.mock import patch
+        from stockstui.data_providers import market_provider
+
+        market_provider._info_cache["AAPL"] = {"currency": "USD"}
+        raw = _close_frame([100.0, 101.0])
+        with patch("stockstui.data_providers.market_provider.yf.Ticker") as mock_tkr:
+            mock_tkr.return_value.history.return_value = raw
+            df = market_provider.get_historical_data("AAPL", "1mo", "1d")
+
+        self.assertNotIn("earnings_date", df.attrs)
 
 
 if __name__ == "__main__":

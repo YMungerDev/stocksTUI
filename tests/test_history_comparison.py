@@ -118,7 +118,7 @@ class TestBeta(unittest.TestCase):
         self.assertIsNone(beta_against(stock, benchmark))
 
 
-class TestComparisonFetch(unittest.TestCase):
+class TestComparisonFetch(unittest.IsolatedAsyncioTestCase):
     """The comparison worker builds a rebased multi-column frame."""
 
     async def test_view_renders_comparison_chart_and_table(self):
@@ -163,6 +163,124 @@ class TestComparisonFetch(unittest.TestCase):
             self.assertTrue(chart._comparison)
             table = view.query_one("#history-correlation-table", DataTable)
             self.assertEqual(table.row_count, 2)  # one row per ticker
+            headers = [str(col.label) for col in table.ordered_columns]
+            self.assertEqual(
+                headers, ["Ticker", "ρ vs NVDA", "ρ vs AMD", "β vs benchmark"]
+            )
+            nvda_row = [cell.plain for cell in table.get_row_at(0)]
+            amd_row = [cell.plain for cell in table.get_row_at(1)]
+            self.assertEqual(nvda_row[0], "NVDA")
+            self.assertEqual(nvda_row[1], "1.00")
+            self.assertEqual(nvda_row[3], "—")  # benchmark beta is last
+            self.assertEqual(amd_row[0], "AMD")
+            self.assertEqual(amd_row[2], "1.00")
+            expected_beta = beta_against(frame["AMD"], frame["NVDA"])
+            self.assertEqual(amd_row[3], f"{expected_beta:.2f}")
+
+    async def test_correlation_table_column_alignment(self):
+        from unittest.mock import MagicMock
+
+        from textual.app import App
+        from textual.widgets import DataTable
+        from stockstui.ui.views.history_view import HistoryView
+
+        idx = pd.bdate_range("2026-01-01", periods=6)
+        frame = pd.DataFrame(
+            {
+                "SPY": [100.0, 110.0, 104.5, 115.0, 109.0, 120.0],
+                "NVDA": [100.0, 125.0, 122.0, 140.0, 118.0, 145.0],
+            },
+            index=idx,
+        )
+        frame.attrs["comparison_tickers"] = ["SPY", "NVDA"]
+        corr = pairwise_correlations(frame)
+        expected_corr = corr.loc["NVDA", "SPY"]
+        expected_beta = beta_against(frame["NVDA"], frame["SPY"])
+        # Ensure correlation and beta are distinct so misalignment is caught.
+        self.assertNotAlmostEqual(expected_corr, expected_beta, places=2)
+
+        class HostApp(App):
+            theme_variables = {}
+            history_ticker = None
+            config = MagicMock()
+            cli_overrides = {}
+            _history_period = "1mo"
+            _last_historical_data = frame
+            _history_sort_column_key = None
+            _history_sort_reverse = False
+
+            def compose(self):
+                yield HistoryView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(HistoryView)
+            view.query_one("#history-view-toggle").value = True
+            await view._render_historical_data()
+            await pilot.pause()
+
+            table = view.query_one("#history-correlation-table", DataTable)
+            headers = [str(col.label) for col in table.ordered_columns]
+            self.assertEqual(
+                headers, ["Ticker", "ρ vs SPY", "ρ vs NVDA", "β vs benchmark"]
+            )
+            spy_row = [cell.plain for cell in table.get_row_at(0)]
+            nvda_row = [cell.plain for cell in table.get_row_at(1)]
+            self.assertEqual(
+                spy_row, ["SPY", "1.00", f"{expected_corr:.2f}", "—"]
+            )
+            self.assertEqual(
+                nvda_row,
+                ["NVDA", f"{expected_corr:.2f}", "1.00", f"{expected_beta:.2f}"],
+            )
+
+    async def test_view_renders_comparison_table_mode(self):
+        from unittest.mock import MagicMock
+
+        from textual.app import App
+        from textual.widgets import DataTable
+        from stockstui.ui.views.history_view import HistoryView
+        from stockstui.ui.widgets.history_chart import HistoryChart
+
+        idx = pd.bdate_range("2026-01-01", periods=5)
+        frame = pd.DataFrame(
+            {
+                "NVDA": [100.0, 105.0, float("nan"), 110.0, 112.5],
+                "AMD": [100.0, 98.5, 101.25, 103.0, 104.0],
+            },
+            index=idx,
+        )
+        frame.attrs["comparison_tickers"] = ["NVDA", "AMD"]
+
+        class HostApp(App):
+            theme_variables = {}
+            history_ticker = None
+            config = MagicMock()
+            cli_overrides = {}
+            _history_period = "1mo"
+            _last_historical_data = frame
+            _history_sort_column_key = None
+            _history_sort_reverse = False
+
+            def compose(self):
+                yield HistoryView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(HistoryView)
+            await view._render_historical_data()
+            await pilot.pause()
+
+            self.assertEqual(len(view.query(HistoryChart)), 0)
+            history_table = view.query_one("#history-table", DataTable)
+            self.assertEqual(history_table.row_count, 5)
+            headers = [str(col.label) for col in history_table.ordered_columns]
+            self.assertEqual(headers, ["Date", "NVDA", "AMD"])
+            self.assertEqual(history_table.get_row_at(0), ["2026-01-01", "100.00", "100.00"])
+            self.assertEqual(history_table.get_row_at(2), ["2026-01-05", "—", "101.25"])
+
+            corr_table = view.query_one("#history-correlation-table", DataTable)
+            self.assertEqual(corr_table.row_count, 2)
 
     async def test_multi_ticker_input_dispatches_comparison(self):
         from unittest.mock import MagicMock
@@ -199,6 +317,50 @@ class TestComparisonFetch(unittest.TestCase):
             self.assertEqual(args[0][0], ["NVDA", "AMD"])
             self.assertEqual(app.history_ticker, "NVDA,AMD")
             # Single-ticker fetch was NOT used.
+            app.fetch_historical_data.assert_not_called()
+
+    async def test_single_ratio_input_dispatches_comparison(self):
+        from unittest.mock import MagicMock
+
+        from textual.app import App
+        from textual.widgets import Input
+        from stockstui.ui.views.history_view import HistoryView
+
+        class HostApp(App):
+            theme_variables = {}
+            history_ticker = None
+            config = MagicMock()
+            cli_overrides = {}
+            _history_period = None
+            _last_historical_data = None
+            _history_sort_column_key = None
+            _history_sort_reverse = False
+            fetch_historical_comparison = MagicMock()
+            fetch_historical_data = MagicMock()
+
+            def compose(self):
+                yield HistoryView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(HistoryView)
+            inp = view.query_one("#history-ticker-input", Input)
+            inp.value = "nvda/smh"
+            view.on_history_ticker_submitted(Input.Submitted(inp, "nvda/smh"))
+            await pilot.pause()
+
+            app.fetch_historical_comparison.assert_called_once()
+            args = app.fetch_historical_comparison.call_args
+            self.assertEqual(args[0][0], ["NVDA/SMH"])
+            self.assertEqual(app.history_ticker, "NVDA/SMH")
+            app.fetch_historical_data.assert_not_called()
+
+            # Period changes on an active single ratio also dispatch comparison.
+            app.fetch_historical_comparison.reset_mock()
+            view._request_historical_data()
+            await pilot.pause()
+            app.fetch_historical_comparison.assert_called_once()
+            self.assertEqual(app.fetch_historical_comparison.call_args[0][0], ["NVDA/SMH"])
             app.fetch_historical_data.assert_not_called()
 
 

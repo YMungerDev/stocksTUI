@@ -20,6 +20,18 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+METRIC_KEYS = (
+    "1W Return",
+    "1M Return",
+    "YTD Return",
+    "1Y Return",
+    "vs 50d MA",
+    "vs 200d MA",
+    "RSI(14)",
+    "30d Vol",
+    "Rel Volume",
+)
+
 
 class FilterError(ValueError):
     """Raised for expressions that fail to compile or evaluate."""
@@ -28,8 +40,12 @@ class FilterError(ValueError):
 def normalise_quotes(quotes: list[dict[str, Any]]) -> pd.DataFrame:
     """
     Builds the query DataFrame from price-cache entries: normalised
-    snake_case columns plus computed off_ath and pct_change.
+    snake_case columns plus computed off_ath and pct_change (and any attached
+    computed metrics from METRIC_KEYS).
     """
+    present_metric_keys = [
+        key for key in METRIC_KEYS if any(key in quote for quote in quotes if quote)
+    ]
     rows = []
     for quote in quotes:
         if not quote:
@@ -66,6 +82,9 @@ def normalise_quotes(quotes: list[dict[str, Any]]) -> pd.DataFrame:
         else:
             row["off_ath"] = None
             row["pct_change"] = None
+        for key in present_metric_keys:
+            value = quote.get(key)
+            row[key] = None if value == "" else value
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -134,17 +153,18 @@ CSV_COLUMNS: list[str] = [
 
 
 def to_csv(quotes: list[dict[str, Any]]) -> str:
-    """CSV of raw numbers over the fixed column set."""
+    """CSV of raw numbers over the fixed column set plus any attached metrics."""
     import csv
     import io
 
     frame = normalise_quotes(quotes)
+    columns = list(CSV_COLUMNS) + [col for col in METRIC_KEYS if col in frame.columns]
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(CSV_COLUMNS)
+    writer.writerow(columns)
     for _, row in frame.iterrows():
         values = []
-        for column in CSV_COLUMNS:
+        for column in columns:
             value = row.get(column)
             if value is None or (isinstance(value, float) and value != value):
                 values.append("")

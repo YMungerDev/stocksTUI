@@ -1041,6 +1041,26 @@ def refresh_daily_bars(tickers: list[str], start_date: datetime) -> None:
         )
 
 
+def _attach_earnings_date(data: pd.DataFrame, ticker: str) -> None:
+    """Attaches cached upcoming earnings date to historical frame attrs if known."""
+    if data is None or data.empty:
+        return
+    earnings_date = None
+    cached = get_cached_price(ticker)
+    if cached:
+        earnings_date = cached.get("next_earnings")
+    if not earnings_date:
+        cal_entry = _calendar_cache.get(ticker.upper())
+        if (
+            isinstance(cal_entry, tuple)
+            and len(cal_entry) == 2
+            and isinstance(cal_entry[1], dict)
+        ):
+            earnings_date = cal_entry[1].get("earnings_date")
+    if earnings_date:
+        data.attrs["earnings_date"] = earnings_date
+
+
 def get_historical_data(ticker: str, period: str, interval: str = "1d"):
     df = pd.DataFrame()
     df.attrs["symbol"] = ticker.upper()
@@ -1064,6 +1084,7 @@ def get_historical_data(ticker: str, period: str, interval: str = "1d"):
             data.attrs["symbol"] = ticker.upper()
             data.attrs["currency"] = info.get("currency")
             data.attrs["source"] = "local bar store"
+            _attach_earnings_date(data, ticker)
             record_outcome(
                 "history", ok=True, detail=f"{ticker} {period}/{interval} (local)"
             )
@@ -1092,6 +1113,7 @@ def get_historical_data(ticker: str, period: str, interval: str = "1d"):
             # The view always shows adjusted OHLC, store or not: without the
             # Adj Close column (e.g. intraday) this is a no-op.
             data = _apply_adj_close_column(data)
+            _attach_earnings_date(data, ticker)
             record_outcome("history", ok=True, detail=f"{ticker} {period}/{interval}")
         return data
     except Exception as e:

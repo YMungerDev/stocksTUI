@@ -51,7 +51,7 @@ def earnings_dates_in_range(
     cached = bars_frame.attrs.get("earnings_date")
     if cached is None:
         return []
-    if isinstance(cached, (datetime, date)):
+    if isinstance(cached, (datetime, date, str)):
         cached = [cached]
     out = []
     for value in cached:

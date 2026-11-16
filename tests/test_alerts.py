@@ -214,10 +214,6 @@ class TestDesktopNotifier(unittest.TestCase):
         self.assertFalse(send_desktop_notification("t", "m"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAlertModalAndAppFlow(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         import tempfile
@@ -316,3 +312,157 @@ class TestAlertModalAndAppFlow(unittest.IsolatedAsyncioTestCase):
         finally:
             alerts.send_desktop_notification = original
             market_provider._price_cache.clear()
+
+    def test_describe_formats_52w_without_trailing_number(self):
+        from stockstui.ui.alert_modal import AlertModal
+
+        self.assertEqual(
+            AlertModal._describe({"rule_type": RULE_52W_HIGH, "threshold": 0.0}),
+            "New 52-week high",
+        )
+        self.assertEqual(
+            AlertModal._describe({"rule_type": RULE_52W_LOW, "threshold": 0.0}),
+            "New 52-week low",
+        )
+        self.assertEqual(
+            AlertModal._describe({"rule_type": RULE_ABOVE, "threshold": 150.0}),
+            "Price above 150",
+        )
+
+    async def test_modal_adds_52w_rules_with_empty_threshold(self):
+        from textual.app import App
+        from textual.widgets import Input, Select, Static
+
+        from stockstui.ui.alert_modal import AlertModal
+
+        class HostApp(App):
+            db_manager = self.db
+            notify = MagicMock()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            modal = AlertModal("AAPL", [])
+            await app.push_screen(modal)
+            await pilot.pause()
+
+            threshold_input = modal.query_one("#alert-threshold-input", Input)
+            select = modal.query_one("#alert-type-select", Select)
+
+            select.value = RULE_52W_HIGH
+            threshold_input.value = ""
+            await pilot.click("#alert-add")
+            await pilot.pause(0.25)
+
+            select.value = RULE_52W_LOW
+            threshold_input.value = "   "
+            await pilot.click("#alert-add")
+            await pilot.pause()
+
+            rules = self.db.load_alert_rules()
+            self.assertEqual(
+                [(r["rule_type"], r["threshold"]) for r in rules],
+                [(RULE_52W_HIGH, 0.0), (RULE_52W_LOW, 0.0)],
+            )
+
+            labels = [
+                str(lbl.render())
+                for lbl in modal.query("#alert-list .alert-rule-label")
+                if isinstance(lbl, Static)
+            ]
+            self.assertEqual(labels, ["New 52-week high", "New 52-week low"])
+            self.assertTrue(modal.dirty)
+
+    async def test_modal_guards_against_blank_rule_type(self):
+        from textual.app import App
+        from textual.widgets import Button, Select
+
+        from stockstui.ui.alert_modal import AlertModal
+
+        class HostApp(App):
+            db_manager = self.db
+            notify = MagicMock()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            modal = AlertModal("AAPL", [])
+            await app.push_screen(modal)
+            await pilot.pause()
+
+            with patch.object(
+                modal, "query_one", return_value=MagicMock(value=Select.BLANK)
+            ):
+                self.assertIsNone(modal._selected_rule_type())
+
+            app.notify.reset_mock()
+            add_btn = modal.query_one("#alert-add", Button)
+            with patch.object(modal, "_selected_rule_type", return_value=None):
+                modal.on_button_pressed(Button.Pressed(add_btn))
+            self.assertEqual(self.db.load_alert_rules(), [])
+            app.notify.assert_called_once_with(
+                "Select a rule type.", severity="warning"
+            )
+
+    async def test_open_alert_modal_redisplays_only_when_dirty(self):
+        from textual.app import App
+        from textual.widgets import Button, DataTable, Select
+
+        from stockstui.ui.views.watchlist_view import open_alert_modal
+
+        class WatchlistHostApp(App):
+            def __init__(self, db_manager):
+                super().__init__()
+                self.db_manager = db_manager
+                self._redisplay_price_table = MagicMock()
+                self.notify = MagicMock()
+
+            def compose(self):
+                yield DataTable(id="price-table")
+
+        app = WatchlistHostApp(self.db)
+        async with app.run_test() as pilot:
+            price_table = app.query_one("#price-table", DataTable)
+            price_table.add_column("Ticker", key="Ticker")
+            price_table.add_row("AAPL", key="AAPL")
+            price_table.move_cursor(row=0)
+
+            # Dismissing via Close without changes does not redisplay.
+            open_alert_modal(app, "stocks")
+            await pilot.pause()
+            await pilot.click("#alert-close")
+            await pilot.pause()
+            app._redisplay_price_table.assert_not_called()
+
+            # Dismissing via Escape without changes does not redisplay.
+            open_alert_modal(app, "stocks")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            app._redisplay_price_table.assert_not_called()
+
+            # Adding a 52w high rule marks dirty and triggers redisplay on Close.
+            open_alert_modal(app, "stocks")
+            await pilot.pause()
+            modal = app.screen
+            modal.query_one("#alert-type-select", Select).value = RULE_52W_HIGH
+            await pilot.click("#alert-add")
+            await pilot.pause()
+            await pilot.click("#alert-close")
+            await pilot.pause()
+            app._redisplay_price_table.assert_called_once()
+
+            # Deleting a rule marks dirty and triggers redisplay on Escape.
+            app._redisplay_price_table.reset_mock()
+            open_alert_modal(app, "stocks")
+            await pilot.pause()
+            modal = app.screen
+            rule_id = self.db.load_alert_rules()[0]["id"]
+            delete_button = modal.query_one(f"#delete-{rule_id}", Button)
+            modal.on_button_pressed(Button.Pressed(delete_button))
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            app._redisplay_price_table.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

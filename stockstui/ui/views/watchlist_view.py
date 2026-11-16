@@ -696,7 +696,12 @@ def open_alert_modal(app: Any, category: str) -> None:
             r for r in app.db_manager.load_alert_rules()
             if r["ticker"] == ticker_val.upper()
         ]
-        app.push_screen(AlertModal(ticker_val.upper(), rules))
+
+        def on_close(dirty: bool | None) -> None:
+            if dirty and hasattr(app, "_redisplay_price_table"):
+                app._redisplay_price_table()
+
+        app.push_screen(AlertModal(ticker_val.upper(), rules), on_close)
     except NoMatches:
         app.bell()
 

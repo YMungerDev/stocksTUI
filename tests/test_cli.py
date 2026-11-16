@@ -1,11 +1,17 @@
 import argparse
+import csv
+import json
+import tempfile
 import unittest
 from io import StringIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 
 from stockstui import cli
+from stockstui.presentation import metrics as metrics_module
+from stockstui.presentation import screening
 
 
 def _make_args(**overrides) -> argparse.Namespace:
@@ -13,6 +19,8 @@ def _make_args(**overrides) -> argparse.Namespace:
         "output": "all",
         "tags": None,
         "session_list": None,
+        "filter": None,
+        "format": "table",
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -22,11 +30,14 @@ def _make_config(
     lists: dict | None = None,
     settings: dict | None = None,
     themes: dict | None = None,
+    db_path: Path | None = None,
 ) -> MagicMock:
     cfg = MagicMock()
     cfg.lists = lists if lists is not None else {}
     cfg.settings = settings if settings is not None else {}
     cfg.themes = themes if themes is not None else {}
+    if db_path is not None:
+        cfg.db_path = db_path
     cfg.get_setting.side_effect = lambda key, default=None: cfg.settings.get(
         key, default
     )
@@ -55,10 +66,21 @@ class TestShowManual(unittest.TestCase):
 
 
 class TestRunCliOutput(unittest.TestCase):
-    def _run_with_captured_console(self, args: argparse.Namespace) -> str:
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self._db_path = Path(self._tmpdir.name) / "test.db"
+
+    def _run_with_captured_console(
+        self,
+        args: argparse.Namespace,
+        *,
+        width: int = 250,
+        force_terminal: bool = False,
+    ) -> str:
         buf = StringIO()
         # Extra width: computed metric columns (#2) widened the overview table.
-        real_console = Console(file=buf, force_terminal=False, width=250)
+        real_console = Console(file=buf, force_terminal=force_terminal, width=width)
         with patch("stockstui.cli.Console", return_value=real_console):
             cli.run_cli_output(args)
         return buf.getvalue()
@@ -74,6 +96,7 @@ class TestRunCliOutput(unittest.TestCase):
                 "hidden_list": [{"ticker": "MSFT", "alias": "Microsoft"}],
             },
             settings={"hidden_tabs": ["hidden_list", "fred"]},
+            db_path=self._db_path,
         )
         mock_get_prices.return_value = [
             {
@@ -112,6 +135,7 @@ class TestRunCliOutput(unittest.TestCase):
                 ]
             },
             settings={"hidden_tabs": ["fred"]},
+            db_path=self._db_path,
         )
         mock_get_prices.return_value = [
             {
@@ -141,7 +165,9 @@ class TestRunCliOutput(unittest.TestCase):
     def test_reports_error_when_no_matching_lists(
         self, mock_cfg_cls: MagicMock
     ) -> None:
-        mock_cfg_cls.return_value = _make_config(lists={}, settings={})
+        mock_cfg_cls.return_value = _make_config(
+            lists={}, settings={}, db_path=self._db_path
+        )
         output = self._run_with_captured_console(_make_args(output="nonexistent"))
         self.assertIn("No visible lists found", output)
 
@@ -159,6 +185,7 @@ class TestRunCliOutput(unittest.TestCase):
                     "series_aliases": {"CPIAUCSL": "CPI"},
                 }
             },
+            db_path=self._db_path,
         )
         mock_fred_summary.return_value = {
             "id": "CPIAUCSL",
@@ -176,6 +203,291 @@ class TestRunCliOutput(unittest.TestCase):
         self.assertIn("Economic Data (FRED)", output)
         self.assertIn("CPI", output)
         self.assertIn("314.50", output)
+
+    @patch("stockstui.cli.market_provider.get_market_price_data")
+    @patch("stockstui.cli.ConfigManager")
+    def test_filter_excludes_non_matching_tickers_in_table_mode(
+        self, mock_cfg_cls: MagicMock, mock_get_prices: MagicMock
+    ) -> None:
+        mock_cfg_cls.return_value = _make_config(
+            lists={
+                "stocks": [
+                    {"ticker": "AAPL", "alias": "Apple Inc."},
+                    {"ticker": "XOM", "alias": "Exxon Mobil"},
+                ]
+            },
+            settings={"hidden_tabs": ["fred"]},
+            db_path=self._db_path,
+        )
+        mock_get_prices.return_value = [
+            {
+                "symbol": "AAPL",
+                "description": "Apple",
+                "price": 200.0,
+                "previous_close": 195.0,
+                "pe_ratio": 35.0,
+                "currency": "USD",
+            },
+            {
+                "symbol": "XOM",
+                "description": "Exxon Mobil",
+                "price": 110.0,
+                "previous_close": 112.0,
+                "pe_ratio": 12.0,
+                "currency": "USD",
+            },
+        ]
+
+        output = self._run_with_captured_console(
+            _make_args(output="stocks", filter="pe_ratio < 20")
+        )
+
+        self.assertIn("Exxon Mobil", output)
+        self.assertNotIn("Apple", output)
+        self.assertNotIn("AAPL", output)
+        self.assertNotIn("Invalid Ticker", output)
+
+    @patch("stockstui.cli.market_provider.get_market_price_data")
+    @patch("stockstui.cli.ConfigManager")
+    def test_filter_no_matches_in_table_mode_skips_empty_table(
+        self, mock_cfg_cls: MagicMock, mock_get_prices: MagicMock
+    ) -> None:
+        mock_cfg_cls.return_value = _make_config(
+            lists={"stocks": [{"ticker": "AAPL", "alias": "Apple Inc."}]},
+            settings={"hidden_tabs": ["fred"]},
+            db_path=self._db_path,
+        )
+        mock_get_prices.return_value = [
+            {
+                "symbol": "AAPL",
+                "description": "Apple",
+                "price": 200.0,
+                "previous_close": 195.0,
+                "pe_ratio": 35.0,
+                "currency": "USD",
+            }
+        ]
+
+        output = self._run_with_captured_console(
+            _make_args(output="stocks", filter="pe_ratio > 1000")
+        )
+
+        self.assertIn("No tickers matched the filter expression.", output)
+        self.assertNotIn("Ticker Overview", output)
+        self.assertNotIn("Invalid Ticker", output)
+
+    @patch("stockstui.cli.fred_provider.get_series_summary")
+    @patch("stockstui.cli.market_provider.get_market_price_data")
+    @patch("stockstui.cli.ConfigManager")
+    def test_filter_no_matches_still_renders_fred_section(
+        self,
+        mock_cfg_cls: MagicMock,
+        mock_get_prices: MagicMock,
+        mock_fred_summary: MagicMock,
+    ) -> None:
+        mock_cfg_cls.return_value = _make_config(
+            lists={"stocks": [{"ticker": "AAPL", "alias": "Apple Inc."}]},
+            settings={
+                "hidden_tabs": [],
+                "fred_settings": {
+                    "api_key": "test-key",
+                    "series_list": ["CPIAUCSL"],
+                    "series_aliases": {"CPIAUCSL": "CPI"},
+                },
+            },
+            db_path=self._db_path,
+        )
+        mock_get_prices.return_value = [
+            {"symbol": "AAPL", "description": "Apple", "price": 200.0, "pe_ratio": 35.0}
+        ]
+        mock_fred_summary.return_value = {
+            "id": "CPIAUCSL",
+            "title": "Consumer Price Index",
+            "current": 314.5,
+            "yoy_pct": 2.9,
+            "z_10y": 0.45,
+            "pct_of_range": 82.0,
+            "date": "2025-01-01",
+        }
+
+        output = self._run_with_captured_console(
+            _make_args(output="all", filter="pe_ratio > 1000")
+        )
+
+        self.assertIn("No tickers matched the filter expression.", output)
+        self.assertNotIn("Ticker Overview", output)
+        self.assertIn("Economic Data (FRED)", output)
+        self.assertIn("CPI", output)
+
+    @patch("stockstui.cli.compute_metrics_for_ticker")
+    @patch("stockstui.cli.market_provider.get_market_price_data")
+    @patch("stockstui.cli.ConfigManager")
+    def test_csv_format_narrow_console_does_not_wrap_and_includes_metrics(
+        self,
+        mock_cfg_cls: MagicMock,
+        mock_get_prices: MagicMock,
+        mock_compute_metrics: MagicMock,
+    ) -> None:
+        mock_cfg_cls.return_value = _make_config(
+            lists={
+                "stocks": [
+                    {"ticker": "AAPL", "alias": ""},
+                    {"ticker": "XOM", "alias": ""},
+                ]
+            },
+            settings={"hidden_tabs": ["fred"]},
+            db_path=self._db_path,
+        )
+        mock_get_prices.return_value = [
+            {
+                "symbol": "AAPL",
+                "description": "Apple [Tech] Inc.",
+                "currency": "USD",
+                "price": 200.0,
+                "previous_close": 190.0,
+                "all_time_high": 250.0,
+            },
+            {
+                "symbol": "XOM",
+                "description": "Exxon Mobil Corporation",
+                "currency": "USD",
+                "price": 110.0,
+                "previous_close": 112.0,
+            },
+        ]
+        mock_compute_metrics.side_effect = lambda _store, ticker: (
+            {
+                "1W Return": 0.025,
+                "1M Return": 0.05,
+                "YTD Return": 0.12,
+                "1Y Return": None,
+                "vs 50d MA": 0.03,
+                "vs 200d MA": 0.08,
+                "RSI(14)": 61.5,
+                "30d Vol": 0.22,
+                "Rel Volume": 1.35,
+                "Sparkline": "▁▃▅▇",
+            }
+            if ticker == "AAPL"
+            else {key: "" for key in metrics_module.METRIC_COLUMNS}
+        )
+
+        output = self._run_with_captured_console(
+            _make_args(output="stocks", format="csv"),
+            width=80,
+            force_terminal=True,
+        )
+
+        rows = list(csv.reader(output.splitlines()))
+        self.assertEqual(len(rows), 3)
+        header = rows[0]
+        self.assertEqual(
+            header, list(screening.CSV_COLUMNS) + list(screening.METRIC_KEYS)
+        )
+        aapl = dict(zip(header, rows[1]))
+        xom = dict(zip(header, rows[2]))
+        self.assertEqual(aapl["description"], "Apple [Tech] Inc.")
+        self.assertEqual(float(aapl["1W Return"]), 0.025)
+        self.assertEqual(float(aapl["RSI(14)"]), 61.5)
+        self.assertEqual(aapl["1Y Return"], "")
+        for key in screening.METRIC_KEYS:
+            self.assertEqual(xom[key], "")
+
+    @patch("stockstui.cli.compute_metrics_for_ticker")
+    @patch("stockstui.cli.market_provider.get_market_price_data")
+    @patch("stockstui.cli.ConfigManager")
+    def test_json_format_narrow_console_does_not_mangle_and_includes_metrics(
+        self,
+        mock_cfg_cls: MagicMock,
+        mock_get_prices: MagicMock,
+        mock_compute_metrics: MagicMock,
+    ) -> None:
+        mock_cfg_cls.return_value = _make_config(
+            lists={
+                "stocks": [
+                    {"ticker": "AAPL", "alias": ""},
+                    {"ticker": "XOM", "alias": ""},
+                ]
+            },
+            settings={"hidden_tabs": ["fred"]},
+            db_path=self._db_path,
+        )
+        mock_get_prices.return_value = [
+            {
+                "symbol": "AAPL",
+                "description": "Apple [Tech] Inc.",
+                "currency": "USD",
+                "price": 200.0,
+                "previous_close": 190.0,
+            },
+            {
+                "symbol": "XOM",
+                "description": "Exxon Mobil",
+                "currency": "USD",
+                "price": 110.0,
+                "previous_close": 112.0,
+            },
+        ]
+        mock_compute_metrics.side_effect = lambda _store, ticker: (
+            {
+                "1W Return": 0.025,
+                "1M Return": 0.05,
+                "YTD Return": 0.12,
+                "1Y Return": None,
+                "vs 50d MA": 0.03,
+                "vs 200d MA": 0.08,
+                "RSI(14)": 61.5,
+                "30d Vol": 0.22,
+                "Rel Volume": 1.35,
+                "Sparkline": "▁▃▅▇",
+            }
+            if ticker == "AAPL"
+            else {key: "" for key in metrics_module.METRIC_COLUMNS}
+        )
+
+        output = self._run_with_captured_console(
+            _make_args(output="stocks", format="json"),
+            width=80,
+            force_terminal=True,
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(len(payload), 2)
+        aapl, xom = payload[0], payload[1]
+        self.assertEqual(aapl["description"], "Apple [Tech] Inc.")
+        self.assertEqual(aapl["1W Return"], 0.025)
+        self.assertEqual(aapl["RSI(14)"], 61.5)
+        self.assertIsNone(aapl["1Y Return"])
+        self.assertNotIn("Sparkline", aapl)
+        for key in screening.METRIC_KEYS:
+            self.assertIn(key, xom)
+            self.assertIsNone(xom[key])
+
+    def test_attach_cli_metrics_normalizes_empty_strings_to_none(self) -> None:
+        quotes = [{"symbol": "AAPL", "price": 200.0}]
+        fake_metrics = {
+            "1W Return": 0.01,
+            "1M Return": "",
+            "YTD Return": None,
+            "1Y Return": 0.25,
+            "vs 50d MA": "",
+            "vs 200d MA": -0.02,
+            "RSI(14)": 55.0,
+            "30d Vol": "",
+            "Rel Volume": 1.1,
+            "Sparkline": "▁▃▅",
+        }
+        with patch(
+            "stockstui.cli.compute_metrics_for_ticker", return_value=fake_metrics
+        ):
+            cli._attach_cli_metrics(quotes, bar_store=MagicMock())
+
+        self.assertEqual(quotes[0]["1W Return"], 0.01)
+        self.assertIsNone(quotes[0]["1M Return"])
+        self.assertIsNone(quotes[0]["YTD Return"])
+        self.assertIsNone(quotes[0]["vs 50d MA"])
+        self.assertIsNone(quotes[0]["30d Vol"])
+        self.assertNotIn("Sparkline", quotes[0])
 
 
 if __name__ == "__main__":

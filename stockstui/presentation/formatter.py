@@ -1,5 +1,6 @@
 from datetime import date, datetime
 
+import pandas as pd
 from dateutil.tz import gettz
 from rich.text import Text
 
@@ -149,16 +150,27 @@ def format_price_data_for_table(
     return rows
 
 
+def _format_comparison_cell(val) -> str:
+    """Formats a comparison or non-OHLCV historical table cell."""
+    if val is None or pd.isna(val):
+        return "—"
+    try:
+        return f"{val:,.2f}"
+    except (TypeError, ValueError):
+        return str(val)
+
+
 def format_historical_data_as_table(data):
     """
     Formats a pandas DataFrame of historical data into a Textual DataTable.
 
     It intelligently formats the date/time column based on whether the data is
     daily or intraday. All other numerical data is formatted as currency or a
-    comma-separated number.
+    comma-separated number. Comparison and non-OHLCV frames render each
+    column as a formatted numeric series.
 
     Args:
-        data: A pandas DataFrame containing historical OHLCV data.
+        data: A pandas DataFrame containing historical OHLCV or comparison data.
 
     Returns:
         A Textual DataTable widget ready for display.
@@ -175,6 +187,22 @@ def format_historical_data_as_table(data):
     else:
         table.add_column("Date", key="Date")
         date_format = "%Y-%m-%d"
+
+    is_comparison = (
+        bool(hasattr(data, "attrs") and data.attrs.get("comparison_tickers"))
+        or "Open" not in data.columns
+    )
+    if is_comparison:
+        for col in data.columns:
+            table.add_column(str(col), key=str(col))
+
+        col_arrays = [data[col].values for col in data.columns]
+        for idx, *values in zip(data.index, *col_arrays):
+            table.add_row(
+                idx.strftime(date_format),
+                *[_format_comparison_cell(val) for val in values],
+            )
+        return table
 
     table.add_column("Open", key="Open")
     table.add_column("High", key="High")

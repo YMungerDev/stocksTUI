@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import Any
@@ -68,6 +69,17 @@ class HistoryView(Vertical):
     ]
 
     app: Any
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._render_lock: asyncio.Lock | None = None
+        self._overlay_states: dict[str, bool] = {
+            "sma50": False,
+            "sma200": False,
+            "volume": False,
+            "drawdown": False,
+            "earnings": False,
+        }
 
     def compose(self) -> ComposeResult:
         """Creates the layout for the historical data view."""
@@ -149,16 +161,21 @@ class HistoryView(Vertical):
         """
         Toggles a chart overlay on the currently displayed chart.
 
-        Turning on the 200-day SMA while the visible window is shorter than
-        a year refetches with a wider period instead of silently drawing
-        nothing.
+        Turning on the 50-day or 200-day SMA while the visible window has
+        too few bars refetches with a wider period instead of silently
+        drawing nothing.
         """
         try:
             chart = self.query_one(HistoryChart)
             chart.toggle_overlay(overlay)
-            if overlay == "sma200" and chart._overlay_states["sma200"]:
-                if not self.app._history_period:
-                    return
+            self._overlay_states = dict(chart._overlay_states)
+            sma_windows = {"sma50": 50, "sma200": 200}
+            window = sma_windows.get(overlay)
+            if (
+                window is not None
+                and chart._overlay_states.get(overlay)
+                and not getattr(chart, "_comparison", False)
+            ):
                 from stockstui.presentation.overlays import moving_average
 
                 closes = (
@@ -167,7 +184,7 @@ class HistoryView(Vertical):
                     and "Close" in self.app._last_historical_data
                     else None
                 )
-                if closes is None or moving_average(closes, 200) is None:
+                if closes is None or moving_average(closes, window) is None:
                     self._request_historical_data()
         except NoMatches:
             self.app.bell()
@@ -177,6 +194,12 @@ class HistoryView(Vertical):
         Renders the appropriate view (table or chart) in the history tab.
         It uses the `_last_historical_data` from the app state.
         """
+        if self._render_lock is None:
+            self._render_lock = asyncio.Lock()
+        async with self._render_lock:
+            await self._render_historical_data_unlocked()
+
+    async def _render_historical_data_unlocked(self):
         try:
             display_container = self.query_one("#history-display-container")
             await display_container.remove_children()  # Clear previous content
@@ -228,14 +251,18 @@ class HistoryView(Vertical):
                     period=self.app._history_period,
                     comparison=bool(is_comparison),
                 )
+                chart_widget._overlay_states = dict(self._overlay_states)
                 await display_container.mount(chart_widget)
                 if is_comparison:
                     await self._mount_correlation_table(last_data)
             else:
                 # Display as a table
+                is_comparison = bool(last_data.attrs.get("comparison_tickers"))
                 table = formatter.format_historical_data_as_table(last_data)
                 await display_container.mount(table)
                 self.apply_table_sort()
+                if is_comparison:
+                    await self._mount_correlation_table(last_data)
         except NoMatches:
             pass
 
@@ -258,16 +285,14 @@ class HistoryView(Vertical):
             table.add_columns("Ticker", *[f"ρ vs {c}" for c in columns], "β vs benchmark")
             for ticker in columns:
                 beta_value = betas.get(ticker)
-                row: list = [
-                    Text(ticker, style="bold"),
-                    Text(f"{beta_value:.2f}" if beta_value is not None else "—"),
-                ]
+                row: list = [Text(ticker, style="bold")]
                 for other in columns:
                     if other == ticker:
                         row.append(Text("1.00", style="dim"))
                         continue
                     value = correlations.loc[ticker, other]
                     row.append(Text(f"{value:.2f}"))
+                row.append(Text(f"{beta_value:.2f}" if beta_value is not None else "—"))
                 table.add_row(*row)
             # The chart container hosts the table beneath the chart.
             await self.query_one("#history-display-container").mount(table)
@@ -287,7 +312,7 @@ class HistoryView(Vertical):
             for t in str(self.app.history_ticker).split(",")
             if t.strip()
         ]
-        if len(entries) > 1:
+        if len(entries) > 1 or (len(entries) == 1 and "/" in entries[0]):
             try:
                 display_container = self.query_one("#history-display-container")
                 display_container.loading = True
@@ -317,19 +342,23 @@ class HistoryView(Vertical):
                     # Use a 5-minute interval for the 1D period, otherwise default to daily.
                     interval = "5m" if button_label == "1D" else "1d"
 
-                    # The 200-day SMA needs more history than shorter
-                    # periods provide; fetch a year so the average is not
-                    # truncated (per #8's acceptance criteria).
+                    # Moving averages need enough daily bars so the line is
+                    # never truncated (per #8's acceptance criteria).
                     fetch_period = period
-                    try:
-                        chart = self.query_one(HistoryChart)
-                        if (
-                            chart._overlay_states.get("sma200")
-                            and period not in ("1y", "5y", "max")
-                        ):
-                            fetch_period = "1y"
-                    except NoMatches:
-                        pass
+                    if self._overlay_states.get("sma200") and period not in (
+                        "1y",
+                        "5y",
+                        "max",
+                    ):
+                        fetch_period = "1y"
+                    elif self._overlay_states.get("sma50") and period in (
+                        "1d",
+                        "5d",
+                        "1mo",
+                    ):
+                        fetch_period = "6mo"
+                    if fetch_period != period:
+                        interval = "1d"
 
                     display_container = self.query_one("#history-display-container")
                     display_container.loading = True  # Show loading indicator

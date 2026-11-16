@@ -193,5 +193,37 @@ class TestStatementRendering(unittest.TestCase):
         self.assertEqual(rows[0][1].plain, "—")
 
 
+class TestFundamentalsViewRendering(unittest.IsolatedAsyncioTestCase):
+    async def test_statement_headers_match_newest_first_row_order(self):
+        from textual.app import App
+        from stockstui.ui.views.fundamentals_view import FundamentalsView
+        from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
+
+        class HostApp(App):
+            config = MagicMock()
+            config.lists = {}
+            fundamentals_ticker = None
+
+            def compose(self):
+                yield FundamentalsView()
+
+        app = HostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(FundamentalsView)
+            view.update_statements(_aapl_like_statements())
+            await pilot.pause()
+
+            table = view.query_one("#fundamentals-table", NavigableDataTable)
+            headers = [str(col.label) for col in table.columns.values()]
+            self.assertEqual(
+                headers, ["Line Item", "2026-09-30", "2025-09-30", "2024-09-30"]
+            )
+            first_row = [str(cell) for cell in table.get_row_at(0)]
+            self.assertEqual(first_row[0], "Total Revenue")
+            self.assertIn("478", first_row[1].replace(",", ""))
+            self.assertIn("416", first_row[2].replace(",", ""))
+            self.assertIn("391", first_row[3].replace(",", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

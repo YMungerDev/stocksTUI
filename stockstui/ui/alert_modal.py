@@ -1,19 +1,30 @@
 """Modal for managing price alert rules for one ticker (#3)."""
 
 import logging
+from typing import ClassVar
 
 from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 
-from stockstui.alerts import PCT_RULES, RULE_TYPES
+from stockstui.alerts import (
+    RULE_52W_HIGH,
+    RULE_52W_LOW,
+    RULE_TYPES,
+    describe_rule_short,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class AlertModal(ModalScreen[None]):
+class AlertModal(ModalScreen[bool]):
     """Lists a ticker's alert rules and offers add/delete controls."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "close_modal", "Close", show=False)
+    ]
 
     def __init__(self, ticker: str, rules: list[dict]) -> None:
         """
@@ -63,28 +74,27 @@ class AlertModal(ModalScreen[None]):
                 yield Button("Add Alert", variant="primary", id="alert-add")
                 yield Button("Close", id="alert-close")
 
+    def action_close_modal(self) -> None:
+        """Closes the modal, returning whether any alert rules changed."""
+        self.dismiss(self.dirty)
+
     @staticmethod
     def _describe(rule: dict) -> str:
-        rule_type = rule["rule_type"]
-        label = RULE_TYPES.get(rule_type, rule_type)
-        threshold = rule["threshold"]
-        if rule_type in PCT_RULES:
-            return f"{label} {threshold:g}%"
-        if rule_type == "volume_above":
-            return f"{label} {threshold:g}x"
-        return f"{label} {threshold:g}"
+        return describe_rule_short(rule)
 
     def _selected_rule_type(self) -> str | None:
         try:
             select = self.query_one("#alert-type-select", Select)
-            return select.value if select.value else None
+            if select.value is Select.BLANK or not select.value:
+                return None
+            return str(select.value)
         except Exception:  # noqa: BLE001
             return None
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
         if button_id == "alert-close":
-            self.dismiss(None)
+            self.dismiss(self.dirty)
             return
         if button_id.startswith("delete-"):
             rule_id = int(button_id.split("-", 1)[1])
@@ -97,16 +107,23 @@ class AlertModal(ModalScreen[None]):
             return
         if button_id == "alert-add":
             rule_type = self._selected_rule_type()
-            threshold_input = self.query_one("#alert-threshold-input", Input)
-            try:
-                threshold = float(threshold_input.value)
-            except ValueError:
-                self.app.notify(
-                    "Enter a numeric threshold.", severity="warning"
-                )
-                return
             if rule_type is None:
+                self.app.notify("Select a rule type.", severity="warning")
                 return
+            threshold_input = self.query_one("#alert-threshold-input", Input)
+            if (
+                rule_type in (RULE_52W_HIGH, RULE_52W_LOW)
+                and not threshold_input.value.strip()
+            ):
+                threshold = 0.0
+            else:
+                try:
+                    threshold = float(threshold_input.value)
+                except ValueError:
+                    self.app.notify(
+                        "Enter a numeric threshold.", severity="warning"
+                    )
+                    return
             new_id = self.app.db_manager.save_alert_rule(
                 self.ticker, rule_type, threshold
             )

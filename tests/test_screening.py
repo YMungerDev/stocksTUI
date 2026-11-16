@@ -157,5 +157,49 @@ class TestFilterPipeline(unittest.TestCase):
         self.assertEqual(symbols, ["XOM"])
 
 
+class TestMetricPreservation(unittest.TestCase):
+    def test_without_metrics_preserves_exact_19_csv_columns(self):
+        text = screening.to_csv(_quotes())
+        rows = list(csv.reader(text.splitlines()))
+        self.assertEqual(len(screening.CSV_COLUMNS), 19)
+        self.assertEqual(rows[0], screening.CSV_COLUMNS)
+
+        payload = json.loads(screening.to_json(_quotes()))
+        for item in payload:
+            self.assertEqual(list(item.keys()), screening.CSV_COLUMNS)
+
+    def test_empty_quotes_preserves_exact_19_csv_columns(self):
+        rows = list(csv.reader(screening.to_csv([]).splitlines()))
+        self.assertEqual(rows, [screening.CSV_COLUMNS])
+        self.assertEqual(json.loads(screening.to_json([])), [])
+
+    def test_attached_metrics_preserved_in_json_and_csv(self):
+        quotes = _quotes()[:2]
+        for key in screening.METRIC_KEYS:
+            quotes[0][key] = 0.15 if key != "RSI(14)" else 62.5
+        quotes[0]["1Y Return"] = ""
+        quotes[1]["1W Return"] = None
+
+        payload = json.loads(screening.to_json(quotes))
+        expected_keys = screening.CSV_COLUMNS + list(screening.METRIC_KEYS)
+        self.assertEqual(list(payload[0].keys()), expected_keys)
+        self.assertEqual(list(payload[1].keys()), expected_keys)
+        self.assertEqual(payload[0]["1W Return"], 0.15)
+        self.assertEqual(payload[0]["RSI(14)"], 62.5)
+        self.assertIsNone(payload[0]["1Y Return"])
+        for key in screening.METRIC_KEYS:
+            self.assertIsNone(payload[1][key])
+
+        rows = list(csv.reader(screening.to_csv(quotes).splitlines()))
+        self.assertEqual(rows[0], expected_keys)
+        row0 = dict(zip(rows[0], rows[1]))
+        row1 = dict(zip(rows[0], rows[2]))
+        self.assertEqual(float(row0["1W Return"]), 0.15)
+        self.assertEqual(float(row0["RSI(14)"]), 62.5)
+        self.assertEqual(row0["1Y Return"], "")
+        for key in screening.METRIC_KEYS:
+            self.assertEqual(row1[key], "")
+
+
 if __name__ == "__main__":
     unittest.main()

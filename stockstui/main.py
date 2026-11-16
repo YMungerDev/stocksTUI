@@ -166,6 +166,8 @@ class StocksTUI(App):
         Binding("u", "handle_sort_key('u')", "Undo Sort", show=False),
         Binding("v", "handle_sort_key('v')", "Sort by Volume", show=False),
         Binding("o", "handle_sort_key('o')", "Sort by Open", show=False),
+        Binding("H", "handle_sort_key('H')", "Sort by High", show=False),
+        Binding("L", "handle_sort_key('L')", "Sort by Low", show=False),
         Binding("ctrl+c", "copy_text", "Copy", show=False),
         Binding("ctrl+C", "copy_text", "Copy", show=False),
         Binding(
@@ -465,7 +467,7 @@ class StocksTUI(App):
 
         self._top_up_daily_bars()
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="daily_bars", thread=True)
     def _top_up_daily_bars(self) -> None:
         """
         Refreshes the local bar store for watchlist tickers in the background.
@@ -489,6 +491,11 @@ class StocksTUI(App):
         # year is ~252 trading days, so top up ~15 months to be safe.
         topup_start = datetime.now(timezone.utc) - timedelta(days=460)
         market_provider.refresh_daily_bars(tickers, topup_start)
+        try:
+            if not get_current_worker().is_cancelled:
+                self.call_from_thread(self._redisplay_price_table)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not redisplay price table after daily bar top-up: {e}")
 
     def _get_alias_map(self) -> dict[str, str]:
         return build_alias_map(self.config.lists, self._hidden_tabs)
@@ -625,6 +632,7 @@ class StocksTUI(App):
                 "lists": config_container.show_lists,
                 "general": config_container.show_general,
                 "portfolios": config_container.show_portfolios,
+                "fred": config_container.show_fred,
             }
             show_method = view_map.get(config_sub_view)
             if show_method:
@@ -895,6 +903,7 @@ class StocksTUI(App):
                     "lists": config_container.show_lists,
                     "general": config_container.show_general,
                     "portfolios": config_container.show_portfolios,
+                    "fred": config_container.show_fred,
                 }
                 show_method = view_map.get(self._force_config_sub_view)
                 if show_method:
@@ -910,6 +919,8 @@ class StocksTUI(App):
                     config_container.show_lists()
                 elif current_config_view == "portfolios":
                     config_container.show_portfolios()
+                elif current_config_view == "fred":
+                    config_container.show_fred()
                 else:
                     config_container.show_main()
             return
@@ -929,7 +940,7 @@ class StocksTUI(App):
             )
             await watchlist_view.display_category(category)
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="prices", thread=True)
     def fetch_prices(
         self,
         symbols: list[str],
@@ -957,7 +968,7 @@ class StocksTUI(App):
             market_provider.get_info_cache_state().copy()
         )
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="market_status", thread=True)
     def fetch_market_status(self, calendar: str) -> None:
         try:
             status = market_provider.get_market_status(calendar)
@@ -966,7 +977,7 @@ class StocksTUI(App):
         except Exception as e:  # noqa: BLE001
             logger.error(f"Market status worker failed: {e}")
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="news", thread=True)
     def fetch_news(self, tickers_str: str) -> None:
         try:
             tickers = [t.strip().upper() for t in tickers_str.split(",") if t.strip()]
@@ -983,7 +994,7 @@ class StocksTUI(App):
             if not get_current_worker().is_cancelled:
                 self.post_message(NewsDataUpdated(tickers_str, None))
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="filings", thread=True)
     def fetch_filings(self, ticker: str) -> None:
         """Fetches recent SEC filings for a ticker from EDGAR."""
         try:
@@ -995,7 +1006,7 @@ class StocksTUI(App):
             if not get_current_worker().is_cancelled:
                 self.post_message(FilingsDataUpdated(ticker, None))
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="fundamentals", thread=True)
     def fetch_fundamentals(self, ticker: str) -> None:
         """Fetches financial statements for a ticker (cached in SQLite)."""
         try:
@@ -1007,7 +1018,7 @@ class StocksTUI(App):
             if not get_current_worker().is_cancelled:
                 self.post_message(FundamentalsDataUpdated(ticker, {}))
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="research", thread=True)
     def fetch_research(self, ticker: str) -> None:
         """Fetches analyst/ownership research blocks (cached daily)."""
         try:
@@ -1019,7 +1030,7 @@ class StocksTUI(App):
             if not get_current_worker().is_cancelled:
                 self.post_message(ResearchDataUpdated(ticker, {}))
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="history", thread=True)
     def fetch_historical_data(
         self, ticker: str, period: str, interval: str = "1d"
     ) -> None:
@@ -1032,7 +1043,7 @@ class StocksTUI(App):
                 f"Worker fetch_historical_data failed for {ticker} over {period} with interval {interval}: {e}"
             )
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="history", thread=True)
     def fetch_historical_comparison(
         self, tickers: list[str], period: str, interval: str = "1d"
     ) -> None:
@@ -1042,36 +1053,52 @@ class StocksTUI(App):
         keyed 'A/B'), aligned on common dates and rebased to 100.
         """
         try:
+            raw_symbols: list[str] = []
+            for entry in tickers:
+                if "/" in entry:
+                    left, _, right = entry.partition("/")
+                    for part in (left.strip().upper(), right.strip().upper()):
+                        if part and part not in raw_symbols:
+                            raw_symbols.append(part)
+                else:
+                    sym = entry.strip().upper()
+                    if sym and sym not in raw_symbols:
+                        raw_symbols.append(sym)
+
             series_by_key: dict[str, pd.Series] = {}
-            for ticker in tickers:
-                frame = market_provider.get_historical_data(ticker, period, interval)
+            for symbol in raw_symbols:
+                frame = market_provider.get_historical_data(symbol, period, interval)
                 if frame is None or frame.empty or "Close" not in frame.columns:
                     continue
                 closes = pd.Series(
                     frame["Close"].astype(float).to_numpy(), index=frame.index
                 )
-                series_by_key[ticker.upper()] = closes
+                series_by_key[symbol] = closes
 
             # Ratio keys 'A/B' divide A by B on aligned dates.
-            resolved: dict[str, pd.Series] = dict(series_by_key)
-            for key in list(tickers):
-                if "/" in key:
-                    left, _, right = key.partition("/")
-                    left_u, right_u = left.upper().strip(), right.upper().strip()
+            resolved: dict[str, pd.Series] = {}
+            for entry in tickers:
+                if "/" in entry:
+                    left, _, right = entry.partition("/")
+                    left_u, right_u = left.strip().upper(), right.strip().upper()
                     if left_u in series_by_key and right_u in series_by_key:
-                        aligned = align_series(
+                        aligned_pair = align_series(
                             {"a": series_by_key[left_u], "b": series_by_key[right_u]}
                         )
-                        resolved[key.upper()] = aligned["a"] / aligned["b"]
+                        if not aligned_pair.empty:
+                            resolved[f"{left_u}/{right_u}"] = (
+                                aligned_pair["a"] / aligned_pair["b"]
+                            )
+                else:
+                    sym = entry.strip().upper()
+                    if sym in series_by_key:
+                        resolved[sym] = series_by_key[sym]
 
-            resolved = {k: v for k, v in resolved.items() if k in {t.upper() for t in tickers}}
             aligned = align_series(resolved)
             if aligned.empty:
                 raise ValueError("no overlapping data for the requested tickers")
             rebased = rebase_to_100(aligned)
-            rebased.attrs["comparison_tickers"] = [
-                t.upper() for t in tickers
-            ]
+            rebased.attrs["comparison_tickers"] = list(aligned.columns)
             if not get_current_worker().is_cancelled:
                 self.post_message(HistoricalDataUpdated(rebased))
         except Exception as e:  # noqa: BLE001
@@ -1082,7 +1109,7 @@ class StocksTUI(App):
             if not get_current_worker().is_cancelled:
                 self.post_message(HistoricalDataUpdated(df))
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="options_expirations", thread=True)
     def fetch_options_expirations(self, ticker: str) -> None:
         try:
             expirations = options_provider.get_available_expirations(ticker)
@@ -1097,7 +1124,7 @@ class StocksTUI(App):
             if not get_current_worker().is_cancelled:
                 self.post_message(OptionsExpirationsUpdated(ticker, ()))
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True, group="options_chain", thread=True)
     def fetch_options_chain(self, ticker: str, expiration: str) -> None:
         try:
             options_data = options_provider.get_options_chain(ticker, expiration)
@@ -1586,6 +1613,8 @@ class StocksTUI(App):
             return
 
     async def action_enter_open_mode(self) -> None:
+        if self._sort_mode:
+            raise SkipAction()
         if self._open_mode:
             await self.action_handle_open_key("o")
             return
@@ -1759,7 +1788,7 @@ class StocksTUI(App):
 
     def action_edit_ticker_quick(self) -> None:
         if self._sort_mode:
-            return
+            raise SkipAction()
 
         category = self.get_active_category()
         if not is_watchlist_category(category) or category is None:
@@ -1770,6 +1799,8 @@ class StocksTUI(App):
 
     def action_screen(self) -> None:
         """Prompts for a screening expression for the current watchlist."""
+        if self._sort_mode:
+            raise SkipAction()
         category = self.get_active_category()
         if not is_watchlist_category(category):
             self.notify(
@@ -1792,7 +1823,7 @@ class StocksTUI(App):
     def action_manage_alerts(self) -> None:
         """Opens the alert modal for the selected watchlist row."""
         if self._sort_mode:
-            return
+            raise SkipAction()
         category = self.get_active_category()
         if not is_watchlist_category(category) or category is None:
             self.bell()

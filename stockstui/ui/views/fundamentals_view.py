@@ -118,7 +118,7 @@ class FundamentalsView(Vertical):
         ratio_table = self.query_one("#fundamentals-ratio-table", NavigableDataTable)
         ratio_table.add_columns("Metric", "Value")
         table = self.query_one("#fundamentals-table", NavigableDataTable)
-        table.add_columns("Line Item", "Yr -4", "Yr -3", "Yr -2", "Yr -1", "Latest")
+        table.add_columns("Line Item", "Latest", "Yr -1", "Yr -2", "Yr -3", "Yr -4")
         research_table = self.query_one("#research-table", NavigableDataTable)
         research_table.add_columns("Block", "Detail")
         if self.app.fundamentals_ticker:
@@ -183,7 +183,7 @@ class FundamentalsView(Vertical):
                 )
                 return
             columns = payload.get("columns", [])[:5]
-            table.add_columns("Line Item", *[str(c) for c in reversed(columns)])
+            table.add_columns("Line Item", *[str(c) for c in columns])
             unit = " (Q)" if period == "quarterly" else ""
             for row in format_statement_rows(
                 statements.get(key_prefix), _INCOME_ROWS

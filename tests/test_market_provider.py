@@ -17,6 +17,7 @@ class TestMarketProvider(unittest.TestCase):
         market_provider._price_cache.clear()
         market_provider._info_cache.clear()
         market_provider._news_cache.clear()
+        market_provider._calendar_cache.clear()
         market_provider._market_calendars.clear()
 
     @patch("stockstui.data_providers.market_provider.yf.Ticker")
@@ -95,13 +96,20 @@ class TestMarketProvider(unittest.TestCase):
         self.assertEqual(item["publisher"], "N/A")
         self.assertEqual(item["link"], "#")
 
+    @patch("stockstui.data_providers.market_provider.get_ticker_calendar", return_value={})
     @patch("stockstui.data_providers.market_provider.yf.download")
     @patch("stockstui.data_providers.market_provider.yf.Ticker")
     @patch("stockstui.data_providers.market_provider.datetime")
     @patch("stockstui.data_providers.market_provider.pd.Timestamp.now")
     @patch("stockstui.data_providers.market_provider.mcal.get_calendar")
     def test_cache_invalidated_after_market_open(
-        self, mock_get_calendar, mock_pd_now, mock_dt, mock_yf_ticker, mock_yf_download
+        self,
+        mock_get_calendar,
+        mock_pd_now,
+        mock_dt,
+        mock_yf_ticker,
+        mock_yf_download,
+        _mock_get_calendar_events,
     ):
         """
         Test that the price cache is correctly invalidated after a new market session opens.

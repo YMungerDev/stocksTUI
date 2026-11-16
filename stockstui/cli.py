@@ -42,7 +42,7 @@ def _attach_cli_metrics(quotes: list[dict], bar_store) -> None:
         for key, value in values.items():
             if key == "Sparkline":
                 continue
-            quote[key] = value
+            quote[key] = None if value == "" else value
 
 
 def run_cli_output(args: argparse.Namespace) -> None:
@@ -152,6 +152,7 @@ def _run_cli_output_inner(args, config, bar_store, console, header_style) -> Non
         )
         return
 
+    had_ticker_output = False
     if ordered_tickers:
         with console.status("[bold green]Fetching data...[/]"):
             try:
@@ -160,144 +161,170 @@ def _run_cli_output_inner(args, config, bar_store, console, header_style) -> Non
                     ordered_tickers, enable_pre_post_market=enable_pre_post
                 )
                 # Apply the screening expression (--filter) before mapping.
-                if getattr(args, "filter", None):
+                filter_expr = getattr(args, "filter", None)
+                if filter_expr:
                     try:
-                        data = screening.apply_filter(data, args.filter)
+                        data = screening.apply_filter(data, filter_expr)
                     except screening.FilterError as e:
                         console.print(f"[bold red]Filter error:[/] {e}")
                         return
+                    if not isinstance(filter_expr, str) or filter_expr.strip():
+                        matched_symbols = {
+                            item["symbol"] for item in data if "symbol" in item
+                        }
+                        ordered_tickers = [
+                            t for t in ordered_tickers if t in matched_symbols
+                        ]
                 # Map data by symbol for easier lookup
-                data_map = {item["symbol"]: item for item in data}
+                data_map = {item["symbol"]: item for item in data if "symbol" in item}
                 output_format = getattr(args, "format", "table") or "table"
                 if output_format in ("json", "csv"):
                     quotes = [data_map[t] for t in ordered_tickers if t in data_map]
                     _attach_cli_metrics(quotes, bar_store)
                     if output_format == "json":
-                        console.print(screening.to_json(quotes))
+                        console.print(
+                            screening.to_json(quotes),
+                            soft_wrap=True,
+                            crop=False,
+                            highlight=False,
+                            markup=False,
+                        )
                     else:
-                        console.print(screening.to_csv(quotes).rstrip("\n"))
+                        console.print(
+                            screening.to_csv(quotes).rstrip("\n"),
+                            soft_wrap=True,
+                            crop=False,
+                            highlight=False,
+                            markup=False,
+                        )
                     return
             except Exception as e:  # noqa: BLE001
                 console.print(f"[bold red]Failed to fetch data from API:[/] {e}")
                 return
 
-        rows: list[tuple[Any, ...]] = []
-        for ticker in ordered_tickers:
-            ticker_data: dict[str, Any] | None = data_map.get(ticker)
-            if not ticker_data or ticker_data.get("description") in (
-                "Invalid Ticker",
-                "Data Unavailable",
-            ):
+        had_ticker_output = True
+        if not ordered_tickers:
+            console.print(
+                "[yellow]No tickers matched the filter expression.[/yellow]"
+            )
+        else:
+            rows: list[tuple[Any, ...]] = []
+            for ticker in ordered_tickers:
+                ticker_data: dict[str, Any] | None = data_map.get(ticker)
+                if not ticker_data or ticker_data.get("description") in (
+                    "Invalid Ticker",
+                    "Data Unavailable",
+                ):
+                    rows.append(
+                        (
+                            ticker_data.get("description", "Invalid Ticker")
+                            if ticker_data
+                            else "Invalid Ticker",
+                            None,
+                            None,
+                            None,
+                            "N/A",
+                            "N/A",
+                            ticker,
+                            "$",
+                            {},
+                        )
+                    )
+                    continue
+
+                price = ticker_data.get("price")
+                previous_close = ticker_data.get("previous_close")
+
+                change, change_percent = None, None
+                if price is not None and previous_close is not None and previous_close != 0:
+                    change = price - previous_close
+                    change_percent = change / previous_close
+
+                # Resolve currency symbol using the fetched ticker data, not the last item in the list iteration
+                currency_code = ticker_data.get("currency", "USD")
+                sym = formatter.get_currency_symbol(currency_code)
+
+                day_low = ticker_data.get("day_low")
+                day_high = ticker_data.get("day_high")
+                day_range = (
+                    f"{sym}{day_low:,.2f} - {sym}{day_high:,.2f}"
+                    if day_low is not None and day_high is not None
+                    else "N/A"
+                )
+
+                fifty_two_week_low = ticker_data.get("fifty_two_week_low")
+                fifty_two_week_high = ticker_data.get("fifty_two_week_high")
+                wk_range = (
+                    f"{sym}{fifty_two_week_low:,.2f} - {sym}{fifty_two_week_high:,.2f}"
+                    if fifty_two_week_low is not None and fifty_two_week_high is not None
+                    else "N/A"
+                )
+                description = alias_map.get(ticker) or ticker_data.get(
+                    "description", ticker
+                )
+                metrics_row = compute_metrics_for_ticker(bar_store, ticker)
                 rows.append(
                     (
-                        ticker_data.get("description", "Invalid Ticker")
-                        if ticker_data
-                        else "Invalid Ticker",
-                        None,
-                        None,
-                        None,
-                        "N/A",
-                        "N/A",
+                        description,
+                        price,
+                        change,
+                        change_percent,
+                        day_range,
+                        wk_range,
                         ticker,
-                        "$",
-                        {},
+                        sym,
+                        metrics_row,
                     )
                 )
-                continue
 
-            price = ticker_data.get("price")
-            previous_close = ticker_data.get("previous_close")
-
-            change, change_percent = None, None
-            if price is not None and previous_close is not None and previous_close != 0:
-                change = price - previous_close
-                change_percent = change / previous_close
-
-            # Resolve currency symbol using the fetched ticker data, not the last item in the list iteration
-            currency_code = ticker_data.get("currency", "USD")
-            sym = formatter.get_currency_symbol(currency_code)
-
-            day_low = ticker_data.get("day_low")
-            day_high = ticker_data.get("day_high")
-            day_range = (
-                f"{sym}{day_low:,.2f} - {sym}{day_high:,.2f}"
-                if day_low is not None and day_high is not None
-                else "N/A"
+            table = Table(
+                title="Ticker Overview", show_header=True, header_style=header_style
             )
+            table.add_column("Description", style="dim", no_wrap=False)  # Allow wrapping
+            table.add_column("Price", justify="right")
+            table.add_column("Change", justify="right")
+            table.add_column("% Change", justify="right")
+            table.add_column("Day's Range", justify="right")
+            table.add_column("52-Wk Range", justify="right")
+            table.add_column("Ticker", style="dim")
+            metric_columns = [
+                key
+                for key in metrics_module.METRIC_COLUMNS
+                if key != "Sparkline"
+            ]
+            for metric_key in metric_columns:
+                table.add_column(metric_key, justify="right")
 
-            fifty_two_week_low = ticker_data.get("fifty_two_week_low")
-            fifty_two_week_high = ticker_data.get("fifty_two_week_high")
-            wk_range = (
-                f"{sym}{fifty_two_week_low:,.2f} - {sym}{fifty_two_week_high:,.2f}"
-                if fifty_two_week_low is not None and fifty_two_week_high is not None
-                else "N/A"
-            )
-            description = alias_map.get(ticker) or ticker_data.get(
-                "description", ticker
-            )
-            metrics_row = compute_metrics_for_ticker(bar_store, ticker)
-            rows.append(
-                (
-                    description,
-                    price,
-                    change,
-                    change_percent,
-                    day_range,
-                    wk_range,
-                    ticker,
-                    sym,
-                    metrics_row,
+            for desc, price, change, pct, day_r, wk_r, symbol, sym, metrics_row in rows:
+                price_text = f"{sym}{price:,.2f}" if price is not None else "N/A"
+                style, change_text, pct_text = ("dim", "N/A", "N/A")
+                if change is not None and pct is not None:
+                    if change > 0:
+                        style, change_text, pct_text = (
+                            "green",
+                            f"{change:,.2f}",
+                            f"+{pct:.2%}",
+                        )
+                    elif change < 0:
+                        style, change_text, pct_text = "red", f"{change:,.2f}", f"{pct:.2%}"
+                    else:
+                        style, change_text, pct_text = "", "0.00", "0.00%"
+                table.add_row(
+                    desc,
+                    Text(price_text, style="cyan"),
+                    Text(change_text, style=style),
+                    Text(pct_text, style=style),
+                    day_r,
+                    wk_r,
+                    symbol,
+                    *[metrics_row.get(key, "") for key in metric_columns],
                 )
-            )
 
-        table = Table(
-            title="Ticker Overview", show_header=True, header_style=header_style
-        )
-        table.add_column("Description", style="dim", no_wrap=False)  # Allow wrapping
-        table.add_column("Price", justify="right")
-        table.add_column("Change", justify="right")
-        table.add_column("% Change", justify="right")
-        table.add_column("Day's Range", justify="right")
-        table.add_column("52-Wk Range", justify="right")
-        table.add_column("Ticker", style="dim")
-        metric_columns = [
-            key
-            for key in metrics_module.METRIC_COLUMNS
-            if key != "Sparkline"
-        ]
-        for metric_key in metric_columns:
-            table.add_column(metric_key, justify="right")
-
-        for desc, price, change, pct, day_r, wk_r, symbol, sym, metrics_row in rows:
-            price_text = f"{sym}{price:,.2f}" if price is not None else "N/A"
-            style, change_text, pct_text = ("dim", "N/A", "N/A")
-            if change is not None and pct is not None:
-                if change > 0:
-                    style, change_text, pct_text = (
-                        "green",
-                        f"{change:,.2f}",
-                        f"+{pct:.2%}",
-                    )
-                elif change < 0:
-                    style, change_text, pct_text = "red", f"{change:,.2f}", f"{pct:.2%}"
-                else:
-                    style, change_text, pct_text = "", "0.00", "0.00%"
-            table.add_row(
-                desc,
-                Text(price_text, style="cyan"),
-                Text(change_text, style=style),
-                Text(pct_text, style=style),
-                day_r,
-                wk_r,
-                symbol,
-                *[metrics_row.get(key, "") for key in metric_columns],
-            )
-
-        console.print(table)
+            console.print(table)
 
     # --- FRED Data Section ---
     if fred_requested:
-        if ordered_tickers:
+        if had_ticker_output:
             console.print()  # Spacer
         fred_settings = config.settings.get("fred_settings", {})
         api_key = fred_settings.get("api_key")
