@@ -1,5 +1,5 @@
 from textual.message import Message
-from textual.validation import Validator, ValidationResult
+from textual.validation import ValidationResult, Validator
 
 
 class PriceDataUpdated(Message):
@@ -31,6 +31,15 @@ class FilingsDataUpdated(Message):
 
 class FundamentalsDataUpdated(Message):
     """Posted when fundamental statements for a ticker have been fetched."""
+
+    def __init__(self, ticker: str, data: dict | None) -> None:
+        self.ticker = ticker
+        self.data = data
+        super().__init__()
+
+
+class ResearchDataUpdated(Message):
+    """Posted when analyst/ownership research for a ticker has been fetched."""
 
     def __init__(self, ticker: str, data: dict | None) -> None:
         self.ticker = ticker

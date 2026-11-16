@@ -5,8 +5,8 @@ from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult, on
-from textual.containers import Vertical, Horizontal
-from textual.widgets import DataTable, Input, Select, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Input, Select, Static
 
 from stockstui.data_providers import fundamentals_provider
 from stockstui.ui.suggesters import TickerSuggester
@@ -46,6 +46,7 @@ _RATIOS_BY_KEY = [
     ("fcf", "FCF", False),
     ("net_debt_to_ebitda", "Net Debt/EBITDA", False),
 ]
+
 
 
 def format_statement_rows(
@@ -110,12 +111,16 @@ class FundamentalsView(Vertical):
             )
         yield NavigableDataTable(id="fundamentals-ratio-table", zebra_stripes=True)
         yield NavigableDataTable(id="fundamentals-table", zebra_stripes=True)
+        yield Static("Analyst & Ownership Research", classes="content-header")
+        yield NavigableDataTable(id="research-table", zebra_stripes=True)
 
     def on_mount(self) -> None:
         ratio_table = self.query_one("#fundamentals-ratio-table", NavigableDataTable)
         ratio_table.add_columns("Metric", "Value")
         table = self.query_one("#fundamentals-table", NavigableDataTable)
         table.add_columns("Line Item", "Yr -4", "Yr -3", "Yr -2", "Yr -1", "Latest")
+        research_table = self.query_one("#research-table", NavigableDataTable)
+        research_table.add_columns("Block", "Detail")
         if self.app.fundamentals_ticker:
             self.call_after_refresh(self._request_statements)
 
@@ -138,6 +143,7 @@ class FundamentalsView(Vertical):
         table = self.query_one("#fundamentals-table", NavigableDataTable)
         table.loading = True
         self.app.fetch_fundamentals(self.app.fundamentals_ticker)
+        self.app.fetch_research(self.app.fundamentals_ticker)
 
     def update_statements(self, statements: dict[str, Any]) -> None:
         """Receives fetched statements and renders ratios + statements."""
@@ -202,3 +208,137 @@ class FundamentalsView(Vertical):
             return select.value == "quarterly"
         except Exception:  # noqa: BLE001
             return False
+
+    def update_research(self, research: dict[str, Any]) -> None:
+        """Receives the research payload and renders the panel table."""
+        try:
+            table = self.query_one("#research-table", NavigableDataTable)
+            table.loading = False
+            table.clear()
+            rows = format_research_rows(research)
+            if not rows:
+                table.add_row(
+                    Text("No analyst/ownership data for this ticker.", style="dim")
+                )
+                return
+            for block, detail in rows:
+                table.add_row(Text(block, style="bold"), Text(detail))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to render research panel: {e}")
+
+
+def format_research_rows(research: dict[str, Any]) -> list[tuple[str, str]]:
+    """
+    Flattens the research payload into (block, detail) rows. Each block
+    tolerates missing data: absent keys are skipped entirely.
+    """
+    rows: list[tuple[str, str]] = []
+    if not research:
+        return rows
+
+    targets = research.get("price_targets")
+    if targets:
+        parts = []
+        for label, key in (("Mean", "mean"), ("High", "high"), ("Low", "low")):
+            if targets.get(key) is not None:
+                parts.append(f"{label} {targets[key]:,.2f}")
+        if parts:
+            rows.append(("Price Targets", " | ".join(parts)))
+
+    rec = research.get("recommendations")
+    if rec:
+        total = sum(
+            rec.get(k) or 0
+            for k in ("strong_buy", "buy", "hold", "sell", "strong_sell")
+        )
+        rows.append(
+            (
+                "Recommendations",
+                f"{rec.get('strong_buy', 0)} strong buy / {rec.get('buy', 0)} buy / "
+                f"{rec.get('hold', 0)} hold / {rec.get('sell', 0)} sell / "
+                f"{rec.get('strong_sell', 0)} strong sell ({total} analysts)",
+            )
+        )
+
+    eps_est = research.get("eps_estimate")
+    if eps_est:
+        first = eps_est[0]
+        avg = first.get("avg")
+        growth = first.get("growth")
+        if avg is not None:
+            detail = f"EPS est (0q): {avg:.2f}"
+            if growth is not None:
+                detail += f", growth {growth:.1%}"
+            analysts = first.get("numberOfAnalysts")
+            if analysts:
+                detail += f", {int(analysts)} analysts"
+            rows.append(("EPS Estimates", detail))
+
+    rev_est = research.get("revenue_estimate")
+    if rev_est:
+        first = rev_est[0]
+        avg = first.get("avg")
+        if avg is not None:
+            detail = f"Revenue est (0q): {avg:,.0f}"
+            growth = first.get("growth")
+            if growth is not None:
+                detail += f", growth {growth:.1%}"
+            rows.append(("Revenue Estimates", detail))
+
+    history = research.get("earnings_history")
+    if history:
+        surprises = [
+            h.get("surprisePercent")
+            for h in history
+            if h.get("surprisePercent") is not None
+        ]
+        if surprises:
+            rows.append(
+                (
+                    "Earnings Surprises",
+                    f"last {len(surprises)} quarters: "
+                    + ", ".join(f"{s:+.1%}" for s in surprises),
+                )
+            )
+
+    insiders = research.get("insider_transactions")
+    if insiders:
+        latest = insiders[0]
+        detail = f"{latest.get('Insider', '?')}: {latest.get('Text', '')}"
+        rows.append(("Insider Transactions", detail))
+        rows.append(
+            (
+                "  recent",
+                " | ".join(
+                    f"{t.get('Insider', '?')} {t.get('Start Date', '')}"
+                    for t in insiders[1:4]
+                )
+                or "—",
+            )
+        )
+
+    institutional = research.get("institutional_holders")
+    if institutional:
+        top = institutional[:3]
+        rows.append(
+            (
+                "Top Institutional",
+                " | ".join(
+                    f"{h.get('Holder', '?')} {h.get('pctHeld', 0):.1%}"
+                    for h in top
+                ),
+            )
+        )
+
+    major = research.get("major_holders")
+    if major:
+        parts = []
+        if major.get("insidersPercentHeld") is not None:
+            parts.append(f"insiders {major['insidersPercentHeld']:.1%}")
+        if major.get("institutionsPercentHeld") is not None:
+            parts.append(f"institutions {major['institutionsPercentHeld']:.1%}")
+        if major.get("institutionsCount") is not None:
+            parts.append(f"{int(major['institutionsCount'])} institutions")
+        if parts:
+            rows.append(("Ownership", " | ".join(parts)))
+    return rows

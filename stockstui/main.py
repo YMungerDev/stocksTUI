@@ -1,10 +1,10 @@
 import logging
 import webbrowser
-import pandas as pd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
+import pandas as pd
 from platformdirs import PlatformDirs
 from rich.text import Text
 from textual import events, on, work
@@ -37,8 +37,8 @@ from stockstui.cli import run_cli_output, show_manual
 from stockstui.common import (
     CacheTestDataUpdated,
     FilingsDataUpdated,
-    FundamentalsDataUpdated,
     FredDebugDataUpdated,
+    FundamentalsDataUpdated,
     HistoricalDataUpdated,
     ListDebugDataUpdated,
     MarketStatusUpdated,
@@ -46,6 +46,7 @@ from stockstui.common import (
     OptionsDataUpdated,
     OptionsExpirationsUpdated,
     PriceDataUpdated,
+    ResearchDataUpdated,
     TickerDebugDataUpdated,
     TickerInfoComparisonUpdated,
 )
@@ -55,6 +56,7 @@ from stockstui.data_providers import (
     fundamentals_provider,
     market_provider,
     options_provider,
+    research_provider,
 )
 from stockstui.data_providers.portfolio import PortfolioManager
 from stockstui.database.db_manager import DbManager
@@ -63,7 +65,6 @@ from stockstui.parser import create_arg_parser
 from stockstui.presentation import formatter
 from stockstui.presentation.overlays import (
     align_series,
-    beta_against,
     rebase_to_100,
 )
 from stockstui.ui.themes import (
@@ -91,8 +92,8 @@ from stockstui.ui.views.debug_view import (
     populate_ticker_debug_table,
 )
 from stockstui.ui.views.filings_view import FilingsView
-from stockstui.ui.views.fundamentals_view import FundamentalsView
 from stockstui.ui.views.fred_view import FredView
+from stockstui.ui.views.fundamentals_view import FundamentalsView
 from stockstui.ui.views.history_view import HistoryView, sort_history_table
 from stockstui.ui.views.news_view import NewsView
 from stockstui.ui.views.options_view import OptionsView
@@ -981,6 +982,18 @@ class StocksTUI(App):
                 self.post_message(FundamentalsDataUpdated(ticker, {}))
 
     @work(exclusive=True, thread=True)
+    def fetch_research(self, ticker: str) -> None:
+        """Fetches analyst/ownership research blocks (cached daily)."""
+        try:
+            research = research_provider.get_research(ticker, self.db_manager)
+            if not get_current_worker().is_cancelled:
+                self.post_message(ResearchDataUpdated(ticker, research))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Worker fetch_research failed for {ticker}: {e}")
+            if not get_current_worker().is_cancelled:
+                self.post_message(ResearchDataUpdated(ticker, {}))
+
+    @work(exclusive=True, thread=True)
     def fetch_historical_data(
         self, ticker: str, period: str, interval: str = "1d"
     ) -> None:
@@ -1293,6 +1306,18 @@ class StocksTUI(App):
             return
         try:
             self.query_one(FundamentalsView).update_statements(message.data or {})
+        except NoMatches:
+            pass
+
+    @on(ResearchDataUpdated)
+    async def on_research_data_updated(self, message: ResearchDataUpdated) -> None:
+        if (
+            self.get_active_category() != "fundamentals"
+            or self.fundamentals_ticker != message.ticker
+        ):
+            return
+        try:
+            self.query_one(FundamentalsView).update_research(message.data or {})
         except NoMatches:
             pass
 
