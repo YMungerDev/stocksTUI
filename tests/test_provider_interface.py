@@ -21,7 +21,13 @@ class TestProviderRegistry(unittest.TestCase):
         rows = {r["capability"]: r for r in provider_base.get_provider_report()}
         self.assertEqual(set(rows), set(provider_base.CAPABILITIES))
         self.assertTrue(all(r["status"] == "idle" for r in rows.values()))
-        self.assertTrue(all(r["provider"] == "yfinance" for r in rows.values()))
+        # yfinance serves everything except filings, which EDGAR owns (#10).
+        self.assertTrue(
+            all(
+                r["provider"] == ("edgar" if k == "filings" else "yfinance")
+                for k, r in rows.items()
+            )
+        )
 
     def test_recorded_outcome_appears_in_report(self):
         provider_base.record_outcome("history", ok=True, detail="AAPL 1mo/1d")

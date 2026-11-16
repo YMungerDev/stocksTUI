@@ -4,6 +4,7 @@ from textual.widget import Widget
 
 from stockstui.ui.views.calendar_view import CalendarView
 from stockstui.ui.views.debug_view import DebugView
+from stockstui.ui.views.filings_view import FilingsView
 from stockstui.ui.views.fred_view import FredView
 from stockstui.ui.views.history_view import HistoryView
 from stockstui.ui.views.news_view import NewsView
@@ -59,6 +60,16 @@ SPECIAL_TAB_SPECS: tuple[TabViewSpec, ...] = (
         view_class=NewsView,
         primary_widget_selector="#news-ticker-input",
         scrollable_selector="#news-output-display",
+        can_be_default_tab=False,
+        clears_refresh_status=True,
+        resets_config_sub_view=True,
+    ),
+    TabViewSpec(
+        category="filings",
+        view_id="filings-view",
+        view_class=FilingsView,
+        primary_widget_selector="#filings-ticker-input",
+        search_table_selector="#filings-table",
         can_be_default_tab=False,
         clears_refresh_status=True,
         resets_config_sub_view=True,

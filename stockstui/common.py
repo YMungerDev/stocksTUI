@@ -20,6 +20,15 @@ class NewsDataUpdated(Message):
         super().__init__()
 
 
+class FilingsDataUpdated(Message):
+    """Posted when SEC filings for a ticker have been fetched."""
+
+    def __init__(self, ticker: str, data: list[dict] | None) -> None:
+        self.ticker = ticker
+        self.data = data
+        super().__init__()
+
+
 class MarketStatusUpdated(Message):
     """Posted when market status is updated with detailed info"""
 

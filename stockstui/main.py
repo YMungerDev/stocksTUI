@@ -34,6 +34,7 @@ from textual.worker import get_current_worker
 from stockstui.cli import run_cli_output, show_manual
 from stockstui.common import (
     CacheTestDataUpdated,
+    FilingsDataUpdated,
     FredDebugDataUpdated,
     HistoricalDataUpdated,
     ListDebugDataUpdated,
@@ -47,6 +48,7 @@ from stockstui.common import (
 )
 from stockstui.config_manager import ConfigManager
 from stockstui.data_providers import market_provider, options_provider
+from stockstui.data_providers import edgar_provider
 from stockstui.data_providers.portfolio import PortfolioManager
 from stockstui.database.db_manager import DbManager
 from stockstui.log_handler import TextualHandler
@@ -66,6 +68,7 @@ from stockstui.ui.view_registry import (
 )
 from stockstui.ui.views.calendar_view import CalendarView
 from stockstui.ui.views.config_view import ConfigContainer
+from stockstui.ui.views.filings_view import FilingsView
 from stockstui.ui.views.config_views.general_config_view import GeneralConfigView
 from stockstui.ui.views.config_views.lists_config_view import ListsConfigView
 from stockstui.ui.views.debug_view import (
@@ -162,6 +165,7 @@ class StocksTUI(App):
 
     active_list_category: reactive[str | None] = reactive(None)
     news_ticker: reactive[str | None] = reactive(None)
+    filings_ticker: reactive[str | None] = reactive(None)
     history_ticker: reactive[str | None] = reactive(None)
     options_ticker: reactive[str | None] = reactive(None)
     search_target_table: reactive[DataTable | None] = reactive(None)
@@ -323,6 +327,10 @@ class StocksTUI(App):
                 start_category = "news"
                 if isinstance(cli_news, str):
                     self.news_ticker = cli_news
+            elif cli_filings := self.cli_overrides.get("filings"):
+                start_category = "filings"
+                if isinstance(cli_filings, str):
+                    self.filings_ticker = cli_filings
             elif cli_options := self.cli_overrides.get("options"):
                 start_category = "options"
                 if isinstance(cli_options, str):
@@ -928,6 +936,18 @@ class StocksTUI(App):
                 self.post_message(NewsDataUpdated(tickers_str, None))
 
     @work(exclusive=True, thread=True)
+    def fetch_filings(self, ticker: str) -> None:
+        """Fetches recent SEC filings for a ticker from EDGAR."""
+        try:
+            filings = edgar_provider.fetch_filings(ticker)
+            if not get_current_worker().is_cancelled:
+                self.post_message(FilingsDataUpdated(ticker, filings))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Worker fetch_filings failed for {ticker}: {e}")
+            if not get_current_worker().is_cancelled:
+                self.post_message(FilingsDataUpdated(ticker, None))
+
+    @work(exclusive=True, thread=True)
     def fetch_historical_data(
         self, ticker: str, period: str, interval: str = "1d"
     ) -> None:
@@ -1138,6 +1158,15 @@ class StocksTUI(App):
                 self.query_one(NewsView).update_content(*self._last_news_content)
             except NoMatches:
                 pass
+
+    @on(FilingsDataUpdated)
+    async def on_filings_data_updated(self, message: FilingsDataUpdated) -> None:
+        if self.get_active_category() != "filings" or self.filings_ticker != message.ticker:
+            return
+        try:
+            self.query_one(FilingsView).update_filings(message.data)
+        except NoMatches:
+            pass
 
     # Fallback debug message handlers for tests posting directly to app without DebugView mounted
     async def on_ticker_info_comparison_updated(
@@ -1356,6 +1385,11 @@ class StocksTUI(App):
             elif category == "fred":
                 try:
                     self.query_one(FredView).action_edit_series()
+                except NoMatches:
+                    pass
+            elif category == "filings":
+                try:
+                    self.query_one(FilingsView).action_open_filing()
                 except NoMatches:
                     pass
             elif category == "calendar":

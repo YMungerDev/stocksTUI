@@ -8,10 +8,15 @@
 - `feat(db)`: Persist daily price bars in SQLite (`daily_bars` table with raw OHLCV and adjusted closes, never pruned) (#1)
 - `feat(history)`: Serve daily-interval history offline from the local bar store, falling back to the network when the store has no bars
 - `feat(history)`: Incrementally top up stored bars with one batched download per run, starting only a few days before each ticker's newest stored bar
+- `feat(watchlist)`: Add hidden-by-default "Next Earnings" and "Ex-Div Date" columns sourced from `Ticker.calendar`, cached with the slow info fetch and refreshed at most daily (#5)
+- `feat(ui)`: Add a Calendar tab listing upcoming earnings and ex-dividend dates across visible watchlists, sorted by date (#5)
+- `feat(edgar)`: Add an SEC filings provider using EDGAR's submissions JSON — the first non-yfinance capability implementation, serving the `filings` capability through the provider registry (#10)
+- `feat(ui)`: Add a Filings tab showing recent 10-K/10-Q/8-K and other filings with form-type filter; Enter opens the filing in the browser (#10)
 
 ### Fixed
 - `fix(market-provider)`: Return stale cached news when yfinance fails or the ticker turns invalid, instead of surfacing a fetch error when cached news exists (#14)
 - `fix(history)`: Re-download a ticker's full stored range when a split or dividend changes adjustment factors (detected via adjusted-close divergence or new Dividends/Stock Splits rows), keeping stored ratios consistent across the whole history (#1)
+- `fix(watchlist)`: ISO date columns sort as strings (float parsing rejected them) and blank cells sort last (#5)
 
 ### Changed
 - `refactor(market-provider)`: Fetch history as raw bars plus `Adj Close` and apply adjustment ratios at display time, so stored and freshly fetched history render identically (#1)

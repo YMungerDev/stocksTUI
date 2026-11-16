@@ -45,6 +45,11 @@ OPTIONS
         Start on the Options tab. If TICKER is provided, options data for
         that symbol will be loaded. If omitted, the view will be empty.
 
+    -F, --filings [TICKER]
+        Start on the SEC Filings tab. If TICKER is provided, recent EDGAR
+        filings for that symbol will be loaded. If omitted, the view will
+        be empty. Non-US listings are not covered by EDGAR.
+
     --fred [SERIES_ID]
         Start on the Economic Data (FRED) tab. If SERIES_ID is provided,
         data for that FRED series will be loaded. If omitted, the view

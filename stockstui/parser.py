@@ -101,6 +101,15 @@ def create_arg_parser() -> argparse.ArgumentParser:
         "--fred", action="store_true", help="Start on the FRED tab."
     )
     view_group.add_argument(
+        "-F",
+        "--filings",
+        nargs="?",
+        const=True,
+        default=None,
+        metavar="TICKER",
+        help="Start on the SEC Filings tab. Optionally provide a ticker.",
+    )
+    view_group.add_argument(
         "--debug", action="store_true", help="Start on the Debug tab."
     )
     view_group.add_argument(

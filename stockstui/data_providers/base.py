@@ -53,11 +53,15 @@ CAPABILITIES: dict[str, str] = {
     "history": "Historical bars",
     "news": "News feed",
     "options": "Options chains & expirations",
+    "filings": "SEC filings (EDGAR)",
 }
 
 # The implementation currently serving each capability. A future provider
-# takes over a capability by replacing its entry here.
-SERVING_PROVIDER: dict[str, str] = {key: "yfinance" for key in CAPABILITIES}
+# takes over a capability by replacing its entry here; EDGAR already serves
+# filings alongside yfinance.
+SERVING_PROVIDER: dict[str, str] = {
+    key: ("edgar" if key == "filings" else "yfinance") for key in CAPABILITIES
+}
 
 # What serves the data when the primary provider fails, per capability.
 FALLBACKS: dict[str, str] = {
@@ -67,6 +71,7 @@ FALLBACKS: dict[str, str] = {
     "history": "local daily bar store",
     "news": "stale cache",
     "options": "TTL cache",
+    "filings": "TTL cache",
 }
 
 
