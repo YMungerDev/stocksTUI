@@ -328,6 +328,35 @@ DataTable>Header {
   margin-left: 2;
 }
 
+.alert-rule-row {
+  height: 3;
+  width: 100%;
+  align-horizontal: left;
+  padding: 0 1;
+}
+
+.alert-rule-label {
+  width: 1fr;
+  padding: 1 0;
+  color: $text;
+}
+
+.alert-rule-row Button {
+  width: 12;
+  min-width: 12;
+}
+
+#alert-list {
+  height: auto;
+  max-height: 12;
+  margin-bottom: 1;
+  border: round $panel 60%;
+}
+
+#alert-list Static {
+  padding: 1 1;
+}
+
 .config-option-horizontal {
   height: 3;
   layout: horizontal;

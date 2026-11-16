@@ -19,6 +19,7 @@ from stockstui.presentation.metrics import (
     METRIC_COLUMNS,
     compute_metrics_for_ticker,
 )
+from stockstui.ui.alert_modal import AlertModal
 from stockstui.ui.quick_edit_ticker_modal import QuickEditTickerModal
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 from stockstui.ui.widgets.tag_filter import TagFilterWidget
@@ -101,6 +102,22 @@ def _attach_metrics(app: Any, data_for_table: list[dict[str, Any]]) -> None:
             continue
         values = compute_metrics_for_ticker(app.db_manager, ticker)
         item["_metrics"] = {key: values.get(key) for key in wanted}
+
+
+def _attach_alert_flags(app: Any, data_for_table: list[dict[str, Any]]) -> None:
+    """Marks rows whose ticker has at least one alert rule (for the ● indicator)."""
+    try:
+        tickers_with_alerts = {
+            r["ticker"] for r in app.db_manager.load_alert_rules()
+        }
+    except Exception as e:  # noqa: BLE001 - indicator must never break render
+        logger.warning(f"Failed to load alert rules for indicators: {e}")
+        return
+    if not tickers_with_alerts:
+        return
+    for item in data_for_table:
+        if item.get("symbol") in tickers_with_alerts:
+            item["_has_alerts"] = True
 
 
 def build_alias_map(
@@ -320,7 +337,15 @@ def style_and_populate_price_table(
                     justify="right",
                 )
             elif col_key == "Ticker":
-                text = Text(str(val), style=muted_color)
+                style = muted_color
+                if item.get("_has_alerts"):
+                    # Alert indicator: accent bullet before the symbol.
+                    text = Text(
+                        f"● {val}",
+                        style=theme_vars.get("accent", "blue"),
+                    )
+                else:
+                    text = Text(str(val), style=style)
             else:
                 text = Text(str(val))
 
@@ -488,6 +513,7 @@ def handle_price_data_update(
 
         alias_map = app._get_alias_map()
         _attach_metrics(app, data_for_table)
+        _attach_alert_flags(app, data_for_table)
         rows = formatter.format_price_data_for_table(
             data_for_table, app._price_comparison_data, alias_map
         )
@@ -552,6 +578,7 @@ def redisplay_price_table_from_cache(app: Any, active_category: str | None) -> N
 
         alias_map = app._get_alias_map()
         _attach_metrics(app, data_for_table)
+        _attach_alert_flags(app, data_for_table)
         rows = formatter.format_price_data_for_table(
             data_for_table, app._price_comparison_data, alias_map
         )
@@ -653,6 +680,27 @@ def open_quick_edit_ticker_modal(app: Any, category: str) -> None:
         app.bell()
 
 
+def open_alert_modal(app: Any, category: str) -> None:
+    """Opens AlertModal for the currently selected watchlist row."""
+    try:
+        price_table = app.query_one("#price-table", DataTable)
+        if price_table.cursor_row < 0:
+            app.notify("Select a ticker to manage alerts.", severity="warning")
+            return
+        coordinate = Coordinate(row=price_table.cursor_row, column=0)
+        ticker_val = price_table.coordinate_to_cell_key(coordinate).row_key.value
+        if not ticker_val:
+            return
+
+        rules = [
+            r for r in app.db_manager.load_alert_rules()
+            if r["ticker"] == ticker_val.upper()
+        ]
+        app.push_screen(AlertModal(ticker_val.upper(), rules))
+    except NoMatches:
+        app.bell()
+
+
 def toggle_tag_filter_widget(app: Any) -> None:
     """Toggles visibility of #tag-filter when tags exist for the active list."""
     try:
@@ -737,6 +785,7 @@ class WatchlistView(Vertical):
                     if item.get("price") is not None
                 }
                 _attach_metrics(self.app, cached_data)
+                _attach_alert_flags(self.app, cached_data)
                 rows = formatter.format_price_data_for_table(
                     cached_data, self.app._price_comparison_data, alias_map
                 )
@@ -780,3 +829,7 @@ class WatchlistView(Vertical):
     def open_quick_edit_modal(self, category: str) -> None:
         """Opens QuickEditTickerModal for the currently selected watchlist row."""
         open_quick_edit_ticker_modal(self.app, category)
+
+    def open_alerts(self, category: str) -> None:
+        """Opens AlertModal for the currently selected watchlist row."""
+        open_alert_modal(self.app, category)

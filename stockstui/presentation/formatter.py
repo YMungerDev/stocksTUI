@@ -3,8 +3,8 @@ from datetime import date, datetime
 from dateutil.tz import gettz
 from rich.text import Text
 
-from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 from stockstui.presentation.metrics import METRIC_COLUMNS
+from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 
 CURRENCY_SYMBOLS = {
     "USD": "$",
@@ -103,6 +103,7 @@ def format_price_data_for_table(
         next_earnings = item.get("next_earnings")
         ex_dividend = item.get("ex_dividend")
         metrics = item.get("_metrics") or {}
+        has_alerts = bool(item.get("_has_alerts"))
         pct_off_ath = None
         if price is not None and all_time_high is not None and all_time_high != 0:
             pct_off_ath = (price / all_time_high) - 1
@@ -111,6 +112,7 @@ def format_price_data_for_table(
         rows.append(
             {
                 "Description": description,
+                "_has_alerts": has_alerts,  # Internal: alert row indicator
                 "Price": price,
                 "Change": change,
                 "% Change": change_percent,

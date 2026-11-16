@@ -31,6 +31,7 @@ from textual.widgets import (
 )
 from textual.worker import get_current_worker
 
+from stockstui import alerts
 from stockstui.cli import run_cli_output, show_manual
 from stockstui.common import (
     CacheTestDataUpdated,
@@ -133,6 +134,7 @@ class StocksTUI(App):
         Binding("R", "refresh(True)", "Force Refresh", show=True),
         Binding("s", "enter_sort_mode", "Sort", show=True),
         Binding("o", "enter_open_mode", "Open", show=True),
+        Binding("a", "manage_alerts", "Alerts", show=True),
         Binding("/", "focus_search", "Search", show=True),
         Binding("f", "toggle_tag_filter", "Filter", show=True),
         Binding("?", "toggle_help", "Toggle Help", show=True),
@@ -1063,6 +1065,32 @@ class StocksTUI(App):
 
         handle_price_data_update(self, message.data, active_category, now_str)
 
+        # Alerts evaluate on every refresh, against the latest quotes.
+        self._evaluate_alerts()
+
+    def _evaluate_alerts(self) -> None:
+        """Runs stored alert rules against current cached quotes."""
+        try:
+            alerts.evaluate_alerts(
+                self.db_manager,
+                market_provider.get_price_cache_state(),
+                self._notify_alert,
+            )
+        except Exception as e:  # noqa: BLE001 - alerts must not break refresh
+            logger.error(f"Alert evaluation failed: {e}")
+
+    def _notify_alert(self, ticker: str, description: str) -> None:
+        """Textual toast plus best-effort desktop notification."""
+        self.notify(
+            f"{ticker}: {description}",
+            title="Price Alert",
+            severity="warning",
+            timeout=10,
+        )
+        alerts.send_desktop_notification(
+            f"StocksTUI alert: {ticker}", f"{ticker}: {description}"
+        )
+
     def _update_market_status_display(self, status_data: dict) -> None:
         try:
             format_result = formatter.format_market_status(status_data)
@@ -1589,6 +1617,20 @@ class StocksTUI(App):
             return
 
         open_quick_edit_ticker_modal(self, category)
+
+    def action_manage_alerts(self) -> None:
+        """Opens the alert modal for the selected watchlist row."""
+        if self._sort_mode:
+            return
+        category = self.get_active_category()
+        if not is_watchlist_category(category) or category is None:
+            self.bell()
+            return
+        try:
+            watchlist_view = self.query_one(WatchlistView)
+            watchlist_view.open_alerts(category)
+        except NoMatches:
+            self.bell()
 
     @on(TagFilterChanged)
     def on_tag_filter_changed(self, message: TagFilterChanged) -> None:

@@ -125,6 +125,19 @@ class DbManager:
                     PRIMARY KEY (ticker, date)
                 )
             """)
+            # Alert rules persist across restarts; 'last_state' holds the
+            # re-arm bookkeeping (see alerts.py) so a rule that has fired
+            # stays quiet until the condition resets.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS alert_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    rule_type TEXT NOT NULL,
+                    threshold REAL NOT NULL,
+                    last_state TEXT,
+                    created_at REAL NOT NULL
+                )
+            """)
             # Migration guard to add currency column if the table existed but without it.
             try:
                 cursor.execute("ALTER TABLE ticker_info ADD COLUMN currency TEXT")
@@ -390,6 +403,77 @@ class DbManager:
         except sqlite3.Error as e:
             logging.error(f"Failed to read latest bar date for {ticker}: {e}")
             return None
+
+    @_serialized
+    def save_alert_rule(self, ticker: str, rule_type: str, threshold: float) -> int | None:
+        """Inserts one alert rule and returns its row id."""
+        if not self.conn:
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.execute(
+                "INSERT INTO alert_rules (ticker, rule_type, threshold, last_state, created_at) "
+                "VALUES (?, ?, ?, NULL, ?)",
+                (ticker.upper(), rule_type, float(threshold), datetime.now(timezone.utc).timestamp()),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+        except sqlite3.Error as e:
+            logging.error(f"Failed to save alert rule: {e}")
+            if self.conn:
+                self.conn.rollback()
+            return None
+
+    @_serialized
+    def delete_alert_rule(self, rule_id: int) -> None:
+        """Removes one alert rule by id."""
+        if not self.conn:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.execute("DELETE FROM alert_rules WHERE id = ?", (rule_id,))
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Failed to delete alert rule {rule_id}: {e}")
+            if self.conn:
+                self.conn.rollback()
+
+    def load_alert_rules(self) -> list[dict]:
+        """Loads every alert rule, ordered by ticker then type."""
+        if not self.conn:
+            return []
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT id, ticker, rule_type, threshold, last_state FROM alert_rules "
+                "ORDER BY ticker, rule_type, id"
+            )
+            return [
+                {"id": r[0], "ticker": r[1], "rule_type": r[2], "threshold": r[3], "last_state": r[4]}
+                for r in cursor.fetchall()
+            ]
+        except sqlite3.Error as e:
+            logging.error(f"Failed to load alert rules: {e}")
+            return []
+
+    @_serialized
+    def update_alert_rule_state(self, rule_id: int, last_state: str | None) -> None:
+        """Persists a rule's re-arm state (fired marker or reset)."""
+        if not self.conn:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.execute(
+                "UPDATE alert_rules SET last_state = ? WHERE id = ?", (last_state, rule_id)
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Failed to update alert rule state {rule_id}: {e}")
+            if self.conn:
+                self.conn.rollback()
 
     @_serialized
     def save_price_cache_to_db(self, cache_data: dict):
