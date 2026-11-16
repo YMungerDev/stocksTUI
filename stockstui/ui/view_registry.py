@@ -5,6 +5,7 @@ from textual.widget import Widget
 from stockstui.ui.views.calendar_view import CalendarView
 from stockstui.ui.views.debug_view import DebugView
 from stockstui.ui.views.filings_view import FilingsView
+from stockstui.ui.views.fundamentals_view import FundamentalsView
 from stockstui.ui.views.fred_view import FredView
 from stockstui.ui.views.history_view import HistoryView
 from stockstui.ui.views.news_view import NewsView
@@ -70,6 +71,16 @@ SPECIAL_TAB_SPECS: tuple[TabViewSpec, ...] = (
         view_class=FilingsView,
         primary_widget_selector="#filings-ticker-input",
         search_table_selector="#filings-table",
+        can_be_default_tab=False,
+        clears_refresh_status=True,
+        resets_config_sub_view=True,
+    ),
+    TabViewSpec(
+        category="fundamentals",
+        view_id="fundamentals-view",
+        view_class=FundamentalsView,
+        primary_widget_selector="#fundamentals-ticker-input",
+        search_table_selector="#fundamentals-table",
         can_be_default_tab=False,
         clears_refresh_status=True,
         resets_config_sub_view=True,

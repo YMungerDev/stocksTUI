@@ -37,6 +37,7 @@ from stockstui.cli import run_cli_output, show_manual
 from stockstui.common import (
     CacheTestDataUpdated,
     FilingsDataUpdated,
+    FundamentalsDataUpdated,
     FredDebugDataUpdated,
     HistoricalDataUpdated,
     ListDebugDataUpdated,
@@ -49,7 +50,12 @@ from stockstui.common import (
     TickerInfoComparisonUpdated,
 )
 from stockstui.config_manager import ConfigManager
-from stockstui.data_providers import edgar_provider, market_provider, options_provider
+from stockstui.data_providers import (
+    edgar_provider,
+    fundamentals_provider,
+    market_provider,
+    options_provider,
+)
 from stockstui.data_providers.portfolio import PortfolioManager
 from stockstui.database.db_manager import DbManager
 from stockstui.log_handler import TextualHandler
@@ -85,6 +91,7 @@ from stockstui.ui.views.debug_view import (
     populate_ticker_debug_table,
 )
 from stockstui.ui.views.filings_view import FilingsView
+from stockstui.ui.views.fundamentals_view import FundamentalsView
 from stockstui.ui.views.fred_view import FredView
 from stockstui.ui.views.history_view import HistoryView, sort_history_table
 from stockstui.ui.views.news_view import NewsView
@@ -173,6 +180,7 @@ class StocksTUI(App):
     active_list_category: reactive[str | None] = reactive(None)
     news_ticker: reactive[str | None] = reactive(None)
     filings_ticker: reactive[str | None] = reactive(None)
+    fundamentals_ticker: reactive[str | None] = reactive(None)
     history_ticker: reactive[str | None] = reactive(None)
     options_ticker: reactive[str | None] = reactive(None)
     search_target_table: reactive[DataTable | None] = reactive(None)
@@ -338,6 +346,10 @@ class StocksTUI(App):
                 start_category = "filings"
                 if isinstance(cli_filings, str):
                     self.filings_ticker = cli_filings
+            elif cli_fundamentals := self.cli_overrides.get("fundamentals"):
+                start_category = "fundamentals"
+                if isinstance(cli_fundamentals, str):
+                    self.fundamentals_ticker = cli_fundamentals
             elif cli_options := self.cli_overrides.get("options"):
                 start_category = "options"
                 if isinstance(cli_options, str):
@@ -957,6 +969,18 @@ class StocksTUI(App):
                 self.post_message(FilingsDataUpdated(ticker, None))
 
     @work(exclusive=True, thread=True)
+    def fetch_fundamentals(self, ticker: str) -> None:
+        """Fetches financial statements for a ticker (cached in SQLite)."""
+        try:
+            statements = fundamentals_provider.get_statements(ticker, self.db_manager)
+            if not get_current_worker().is_cancelled:
+                self.post_message(FundamentalsDataUpdated(ticker, statements))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Worker fetch_fundamentals failed for {ticker}: {e}")
+            if not get_current_worker().is_cancelled:
+                self.post_message(FundamentalsDataUpdated(ticker, {}))
+
+    @work(exclusive=True, thread=True)
     def fetch_historical_data(
         self, ticker: str, period: str, interval: str = "1d"
     ) -> None:
@@ -1258,6 +1282,20 @@ class StocksTUI(App):
         except NoMatches:
             pass
 
+    @on(FundamentalsDataUpdated)
+    async def on_fundamentals_data_updated(
+        self, message: FundamentalsDataUpdated
+    ) -> None:
+        if (
+            self.get_active_category() != "fundamentals"
+            or self.fundamentals_ticker != message.ticker
+        ):
+            return
+        try:
+            self.query_one(FundamentalsView).update_statements(message.data or {})
+        except NoMatches:
+            pass
+
     # Fallback debug message handlers for tests posting directly to app without DebugView mounted
     async def on_ticker_info_comparison_updated(
         self, message: TickerInfoComparisonUpdated
@@ -1480,6 +1518,11 @@ class StocksTUI(App):
             elif category == "filings":
                 try:
                     self.query_one(FilingsView).action_open_filing()
+                except NoMatches:
+                    pass
+            elif category == "fundamentals":
+                try:
+                    self.query_one(FundamentalsView).focus()
                 except NoMatches:
                     pass
             elif category == "calendar":

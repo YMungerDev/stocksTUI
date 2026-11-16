@@ -17,6 +17,9 @@ CACHE_LOAD_DURATION_SECONDS = 86400  # 24 hours
 # This keeps the database file size manageable over time.
 CACHE_PRUNE_EXPIRY_SECONDS = 604800  # 7 days
 
+# Fundamentals statements refresh at most daily; they change with filings.
+_FUNDAMENTALS_TTL_SECONDS = 86400  # 24 hours
+
 # Ticker info (exchange, name) changes very rarely. Cache it for a long time.
 INFO_CACHE_EXPIRY_SECONDS = 86400 * 30  # 30 days
 
@@ -136,6 +139,15 @@ class DbManager:
                     threshold REAL NOT NULL,
                     last_state TEXT,
                     created_at REAL NOT NULL
+                )
+            """)
+            # Cached fundamental statements per ticker (JSON payload with a
+            # fetch timestamp); refreshed at most daily.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fundamentals_cache (
+                    ticker TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    timestamp REAL NOT NULL
                 )
             """)
             # Migration guard to add currency column if the table existed but without it.
@@ -474,6 +486,54 @@ class DbManager:
             logging.error(f"Failed to update alert rule state {rule_id}: {e}")
             if self.conn:
                 self.conn.rollback()
+
+    @_serialized
+    def save_fundamentals_cache(self, ticker: str, payload_json: str) -> None:
+        """Stores one ticker's fundamentals payload (JSON) with a timestamp."""
+        if not self.conn:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.execute(
+                "INSERT OR REPLACE INTO fundamentals_cache (ticker, payload, timestamp) "
+                "VALUES (?, ?, ?)",
+                (
+                    ticker.upper(),
+                    payload_json,
+                    datetime.now(timezone.utc).timestamp(),
+                ),
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Failed to save fundamentals cache for {ticker}: {e}")
+            if self.conn:
+                self.conn.rollback()
+
+    def load_fundamentals_cache(self, ticker: str) -> str | None:
+        """
+        Returns the cached fundamentals JSON if fresh (under a day old),
+        else None.
+        """
+        if not self.conn:
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT payload, timestamp FROM fundamentals_cache WHERE ticker = ?",
+                (ticker.upper(),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            payload, timestamp = row
+            age = datetime.now(timezone.utc).timestamp() - timestamp
+            if age > _FUNDAMENTALS_TTL_SECONDS:
+                return None
+            return payload
+        except sqlite3.Error as e:
+            logging.error(f"Failed to load fundamentals cache for {ticker}: {e}")
+            return None
 
     @_serialized
     def save_price_cache_to_db(self, cache_data: dict):

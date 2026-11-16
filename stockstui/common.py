@@ -29,6 +29,15 @@ class FilingsDataUpdated(Message):
         super().__init__()
 
 
+class FundamentalsDataUpdated(Message):
+    """Posted when fundamental statements for a ticker have been fetched."""
+
+    def __init__(self, ticker: str, data: dict | None) -> None:
+        self.ticker = ticker
+        self.data = data
+        super().__init__()
+
+
 class MarketStatusUpdated(Message):
     """Posted when market status is updated with detailed info"""
 

@@ -55,6 +55,10 @@ OPTIONS
         data for that FRED series will be loaded. If omitted, the view
         will show configured series.
 
+    -D, --fundamentals [TICKER]
+        Start on the Fundamentals tab. If TICKER is provided, statements
+        and derived ratios for that symbol will be loaded.
+
     --debug
         Start on the Debug tab, which provides tools for testing API latency
         and cache performance.
