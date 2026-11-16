@@ -98,6 +98,46 @@
         {
             "key": "Ex-Div Date",
             "visible": false
+        },
+        {
+            "key": "1W Return",
+            "visible": false
+        },
+        {
+            "key": "1M Return",
+            "visible": false
+        },
+        {
+            "key": "YTD Return",
+            "visible": false
+        },
+        {
+            "key": "1Y Return",
+            "visible": false
+        },
+        {
+            "key": "vs 50d MA",
+            "visible": false
+        },
+        {
+            "key": "vs 200d MA",
+            "visible": false
+        },
+        {
+            "key": "RSI(14)",
+            "visible": false
+        },
+        {
+            "key": "30d Vol",
+            "visible": false
+        },
+        {
+            "key": "Rel Volume",
+            "visible": false
+        },
+        {
+            "key": "Sparkline",
+            "visible": false
         }
     ]
 }

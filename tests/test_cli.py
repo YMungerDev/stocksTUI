@@ -57,7 +57,8 @@ class TestShowManual(unittest.TestCase):
 class TestRunCliOutput(unittest.TestCase):
     def _run_with_captured_console(self, args: argparse.Namespace) -> str:
         buf = StringIO()
-        real_console = Console(file=buf, force_terminal=False, width=120)
+        # Extra width: computed metric columns (#2) widened the overview table.
+        real_console = Console(file=buf, force_terminal=False, width=250)
         with patch("stockstui.cli.Console", return_value=real_console):
             cli.run_cli_output(args)
         return buf.getvalue()

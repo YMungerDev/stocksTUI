@@ -15,6 +15,10 @@ from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 
 from stockstui.data_providers import market_provider
 from stockstui.presentation import formatter
+from stockstui.presentation.metrics import (
+    METRIC_COLUMNS,
+    compute_metrics_for_ticker,
+)
 from stockstui.ui.quick_edit_ticker_modal import QuickEditTickerModal
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 from stockstui.ui.widgets.tag_filter import TagFilterWidget
@@ -34,6 +38,16 @@ DEFAULT_COLUMN_SETTINGS: list[dict[str, Any]] = [
     {"key": "% Off ATH", "visible": True},
     {"key": "Next Earnings", "visible": False},
     {"key": "Ex-Div Date", "visible": False},
+    {"key": "1W Return", "visible": False},
+    {"key": "1M Return", "visible": False},
+    {"key": "YTD Return", "visible": False},
+    {"key": "1Y Return", "visible": False},
+    {"key": "vs 50d MA", "visible": False},
+    {"key": "vs 200d MA", "visible": False},
+    {"key": "RSI(14)", "visible": False},
+    {"key": "30d Vol", "visible": False},
+    {"key": "Rel Volume", "visible": False},
+    {"key": "Sparkline", "visible": False},
 ]
 
 NUMERIC_SORT_COLUMNS: frozenset[str] = frozenset(
@@ -44,6 +58,15 @@ NUMERIC_SORT_COLUMNS: frozenset[str] = frozenset(
         "Volume",
         "Open",
         "Prev Close",
+        "1W Return",
+        "1M Return",
+        "YTD Return",
+        "1Y Return",
+        "vs 50d MA",
+        "vs 200d MA",
+        "RSI(14)",
+        "30d Vol",
+        "Rel Volume",
     }
 )
 
@@ -56,6 +79,28 @@ def get_visible_column_keys(column_settings: list[dict[str, Any]] | None) -> lis
         for col in settings
         if isinstance(col, dict) and col.get("visible", True)
     ]
+
+
+def _visible_metric_columns(app: Any) -> set[str]:
+    """Metric columns currently visible; the rest cost no computation."""
+    return set(app._visible_columns or []) & set(METRIC_COLUMNS)
+
+
+def _attach_metrics(app: Any, data_for_table: list[dict[str, Any]]) -> None:
+    """
+    Attaches computed metrics to price rows in place, only when at least
+    one metric column is visible. Metrics read the local bar store: no
+    network requests.
+    """
+    wanted = _visible_metric_columns(app)
+    if not wanted or not data_for_table:
+        return
+    for item in data_for_table:
+        ticker = item.get("symbol")
+        if not ticker:
+            continue
+        values = compute_metrics_for_ticker(app.db_manager, ticker)
+        item["_metrics"] = {key: values.get(key) for key in wanted}
 
 
 def build_alias_map(
@@ -237,6 +282,32 @@ def style_and_populate_price_table(
                 else:
                     text = Text("N/A", style=muted_color, justify="right")
             elif col_key in (
+                "1W Return",
+                "1M Return",
+                "YTD Return",
+                "1Y Return",
+                "vs 50d MA",
+                "vs 200d MA",
+            ):
+                # Pre-formatted signed percentage from the formatter; colour
+                # by sign. Blank (no bar data) renders empty, not N/A.
+                if val:
+                    sign = val.startswith("+")
+                    text = Text(
+                        val,
+                        style=success_color if sign else error_color,
+                        justify="right",
+                    )
+                else:
+                    text = Text("", justify="right")
+            elif col_key in ("RSI(14)", "30d Vol", "Rel Volume"):
+                text = Text(
+                    str(val), style="" if val else muted_color, justify="right"
+                )
+            elif col_key == "Sparkline":
+                text = Text(str(val), style="",
+                            justify="left")
+            elif col_key in (
                 "Volume",
                 "Open",
                 "Prev Close",
@@ -291,7 +362,10 @@ def sort_price_table(
             return (0, text_content)
         cleaned_text = re.sub(r"^[^\d\.\-]+", "", text_content)
         cleaned_text = (
-            cleaned_text.replace(",", "").replace("%", "").replace("+", "")
+            cleaned_text.replace(",", "")
+            .replace("%", "")
+            .replace("+", "")
+            .replace("x", "")
         )
         try:
             return (0, float(cleaned_text))
@@ -413,6 +487,7 @@ def handle_price_data_update(
             return
 
         alias_map = app._get_alias_map()
+        _attach_metrics(app, data_for_table)
         rows = formatter.format_price_data_for_table(
             data_for_table, app._price_comparison_data, alias_map
         )
@@ -476,6 +551,7 @@ def redisplay_price_table_from_cache(app: Any, active_category: str | None) -> N
             return
 
         alias_map = app._get_alias_map()
+        _attach_metrics(app, data_for_table)
         rows = formatter.format_price_data_for_table(
             data_for_table, app._price_comparison_data, alias_map
         )
@@ -660,6 +736,7 @@ class WatchlistView(Vertical):
                     for item in cached_data
                     if item.get("price") is not None
                 }
+                _attach_metrics(self.app, cached_data)
                 rows = formatter.format_price_data_for_table(
                     cached_data, self.app._price_comparison_data, alias_map
                 )

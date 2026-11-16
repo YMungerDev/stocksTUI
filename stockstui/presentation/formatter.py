@@ -4,6 +4,7 @@ from dateutil.tz import gettz
 from rich.text import Text
 
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
+from stockstui.presentation.metrics import METRIC_COLUMNS
 
 CURRENCY_SYMBOLS = {
     "USD": "$",
@@ -101,6 +102,7 @@ def format_price_data_for_table(
         all_time_high = item.get("all_time_high")
         next_earnings = item.get("next_earnings")
         ex_dividend = item.get("ex_dividend")
+        metrics = item.get("_metrics") or {}
         pct_off_ath = None
         if price is not None and all_time_high is not None and all_time_high != 0:
             pct_off_ath = (price / all_time_high) - 1
@@ -133,6 +135,7 @@ def format_price_data_for_table(
                 "% Off ATH": pct_off_ath,
                 "Next Earnings": _format_event_date(next_earnings),
                 "Ex-Div Date": _format_event_date(ex_dividend),
+                **{key: _format_metric(key, metrics.get(key)) for key in METRIC_COLUMNS},
                 "_change_direction": change_direction,  # Internal use
                 "_raw_price": price,  # For sorting if needed, though Price is used for display
                 "_raw_change": change,
@@ -326,6 +329,23 @@ def _format_event_date(value) -> str:
     if isinstance(value, (datetime, date)):
         return value.strftime("%Y-%m-%d")
     return str(value)
+
+
+def _format_metric(column_key: str, value) -> str:
+    """Formats a computed metric for its watchlist column."""
+    if value is None or value == "":
+        return ""
+    if column_key == "RSI(14)":
+        return f"{value:.0f}"
+    if column_key == "30d Vol":
+        return f"{value:.0%}"
+    if column_key == "Rel Volume":
+        return f"{value:.2f}x"
+    if column_key == "Sparkline":
+        return str(value)
+    # Returns and MA distances render as signed percentages.
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.1%}"
 
 
 def escape(text: str) -> str:

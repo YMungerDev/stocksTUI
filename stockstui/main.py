@@ -459,8 +459,10 @@ class StocksTUI(App):
         if not tickers:
             return
         logger.info(f"Topping up daily bars for {len(tickers)} tickers.")
-        one_year_ago = datetime.now(timezone.utc) - timedelta(days=366)
-        market_provider.refresh_daily_bars(tickers, one_year_ago)
+        # 200-day SMA columns need >200 trading days of bars; a calendar
+        # year is ~252 trading days, so top up ~15 months to be safe.
+        topup_start = datetime.now(timezone.utc) - timedelta(days=460)
+        market_provider.refresh_daily_bars(tickers, topup_start)
 
     def _get_alias_map(self) -> dict[str, str]:
         return build_alias_map(self.config.lists, self._hidden_tabs)

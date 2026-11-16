@@ -11,6 +11,8 @@ from rich.text import Text
 from stockstui.config_manager import ConfigManager
 from stockstui.data_providers import fred_provider, market_provider
 from stockstui.presentation import formatter
+from stockstui.presentation import metrics as metrics_module
+from stockstui.presentation.metrics import compute_metrics_for_ticker
 from stockstui.utils import parse_tags
 
 
@@ -43,6 +45,17 @@ def run_cli_output(args: argparse.Namespace) -> None:
     theme_data = config.themes.get(theme_name, {})
     header_color = theme_data.get("palette", {}).get("magenta", "magenta")
     header_style = f"bold {header_color}"
+
+    from stockstui.database.db_manager import DbManager
+
+    bar_store = DbManager(config.db_path)
+    try:
+        _run_cli_output_inner(args, config, bar_store, console, header_style)
+    finally:
+        bar_store.close()
+
+
+def _run_cli_output_inner(args, config, bar_store, console, header_style) -> None:
 
     if session_lists := args.session_list:
         for name, tickers in session_lists.items():
@@ -158,6 +171,7 @@ def run_cli_output(args: argparse.Namespace) -> None:
                         "N/A",
                         ticker,
                         "$",
+                        {},
                     )
                 )
                 continue
@@ -192,6 +206,7 @@ def run_cli_output(args: argparse.Namespace) -> None:
             description = alias_map.get(ticker) or ticker_data.get(
                 "description", ticker
             )
+            metrics_row = compute_metrics_for_ticker(bar_store, ticker)
             rows.append(
                 (
                     description,
@@ -202,6 +217,7 @@ def run_cli_output(args: argparse.Namespace) -> None:
                     wk_range,
                     ticker,
                     sym,
+                    metrics_row,
                 )
             )
 
@@ -215,8 +231,15 @@ def run_cli_output(args: argparse.Namespace) -> None:
         table.add_column("Day's Range", justify="right")
         table.add_column("52-Wk Range", justify="right")
         table.add_column("Ticker", style="dim")
+        metric_columns = [
+            key
+            for key in metrics_module.METRIC_COLUMNS
+            if key != "Sparkline"
+        ]
+        for metric_key in metric_columns:
+            table.add_column(metric_key, justify="right")
 
-        for desc, price, change, pct, day_r, wk_r, symbol, sym in rows:
+        for desc, price, change, pct, day_r, wk_r, symbol, sym, metrics_row in rows:
             price_text = f"{sym}{price:,.2f}" if price is not None else "N/A"
             style, change_text, pct_text = ("dim", "N/A", "N/A")
             if change is not None and pct is not None:
@@ -238,6 +261,7 @@ def run_cli_output(args: argparse.Namespace) -> None:
                 day_r,
                 wk_r,
                 symbol,
+                *[metrics_row.get(key, "") for key in metric_columns],
             )
 
         console.print(table)
