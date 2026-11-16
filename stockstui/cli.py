@@ -10,7 +10,7 @@ from rich.text import Text
 
 from stockstui.config_manager import ConfigManager
 from stockstui.data_providers import fred_provider, market_provider
-from stockstui.presentation import formatter
+from stockstui.presentation import formatter, screening
 from stockstui.presentation import metrics as metrics_module
 from stockstui.presentation.metrics import compute_metrics_for_ticker
 from stockstui.utils import parse_tags
@@ -30,6 +30,19 @@ def show_manual() -> None:
         print(f"Error: Help file not found at {help_path}")
     except Exception as e:  # noqa: BLE001
         print(f"An unexpected error occurred while trying to show help: {e}")
+
+
+def _attach_cli_metrics(quotes: list[dict], bar_store) -> None:
+    """Adds computed metrics as raw numbers for json/csv output."""
+    for quote in quotes:
+        ticker = quote.get("symbol")
+        if not ticker:
+            continue
+        values = compute_metrics_for_ticker(bar_store, ticker)
+        for key, value in values.items():
+            if key == "Sparkline":
+                continue
+            quote[key] = value
 
 
 def run_cli_output(args: argparse.Namespace) -> None:
@@ -146,8 +159,24 @@ def _run_cli_output_inner(args, config, bar_store, console, header_style) -> Non
                 data = market_provider.get_market_price_data(
                     ordered_tickers, enable_pre_post_market=enable_pre_post
                 )
+                # Apply the screening expression (--filter) before mapping.
+                if getattr(args, "filter", None):
+                    try:
+                        data = screening.apply_filter(data, args.filter)
+                    except screening.FilterError as e:
+                        console.print(f"[bold red]Filter error:[/] {e}")
+                        return
                 # Map data by symbol for easier lookup
                 data_map = {item["symbol"]: item for item in data}
+                output_format = getattr(args, "format", "table") or "table"
+                if output_format in ("json", "csv"):
+                    quotes = [data_map[t] for t in ordered_tickers if t in data_map]
+                    _attach_cli_metrics(quotes, bar_store)
+                    if output_format == "json":
+                        console.print(screening.to_json(quotes))
+                    else:
+                        console.print(screening.to_csv(quotes).rstrip("\n"))
+                    return
             except Exception as e:  # noqa: BLE001
                 console.print(f"[bold red]Failed to fetch data from API:[/] {e}")
                 return

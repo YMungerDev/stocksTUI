@@ -63,10 +63,13 @@ from stockstui.database.db_manager import DbManager
 from stockstui.log_handler import TextualHandler
 from stockstui.parser import create_arg_parser
 from stockstui.presentation import formatter
+from stockstui.presentation import screening as screening_module
 from stockstui.presentation.overlays import (
     align_series,
     rebase_to_100,
 )
+from stockstui.presentation.screening import FilterError as ScreeningFilterError
+from stockstui.ui.modals import ScreenModal
 from stockstui.ui.themes import (
     BASE_THEME_STRUCTURE,
     extract_theme_variables,
@@ -149,6 +152,7 @@ class StocksTUI(App):
         Binding("s", "enter_sort_mode", "Sort", show=True),
         Binding("o", "enter_open_mode", "Open", show=True),
         Binding("a", "manage_alerts", "Alerts", show=True),
+        Binding("t", "screen", "Screen", show=True),
         Binding("/", "focus_search", "Search", show=True),
         Binding("f", "toggle_tag_filter", "Filter", show=True),
         Binding("?", "toggle_help", "Toggle Help", show=True),
@@ -187,6 +191,7 @@ class StocksTUI(App):
     search_target_table: reactive[DataTable | None] = reactive(None)
     selected_portfolio = reactive("default")
     active_tag_filter: reactive[list[str]] = reactive([])
+    screen_expression: reactive[str | None] = reactive(None)
 
     def __init__(self, cli_overrides: dict | None = None):
         super().__init__()
@@ -494,13 +499,34 @@ class StocksTUI(App):
         )
 
     def _filter_symbols_by_tags(self, category: str, symbols: list[str]) -> list[str]:
-        return filter_symbols_by_tags(
+        filtered = filter_symbols_by_tags(
             self.config.lists,
             self._hidden_tabs,
             category,
             symbols,
             self.active_tag_filter,
         )
+        if self.screen_expression:
+            # Screen over the currently cached quotes; a ticker without
+            # cached data can't match the expression and drops out until
+            # the next refresh populates it.
+            quotes = [
+                q
+                for t in filtered
+                if (q := market_provider.get_cached_price(t))
+            ]
+            try:
+                matched = {
+                    q["symbol"]
+                    for q in screening_module.apply_filter(
+                        quotes, self.screen_expression
+                    )
+                }
+            except ScreeningFilterError as e:
+                self.notify(str(e), severity="warning")
+                return filtered
+            return [t for t in filtered if t in matched]
+        return filtered
 
     def _update_tag_filter_status(self) -> None:
         category = self.get_active_category()
@@ -1741,6 +1767,27 @@ class StocksTUI(App):
             return
 
         open_quick_edit_ticker_modal(self, category)
+
+    def action_screen(self) -> None:
+        """Prompts for a screening expression for the current watchlist."""
+        category = self.get_active_category()
+        if not is_watchlist_category(category):
+            self.notify(
+                "Screening is available on watchlist tabs.", severity="warning"
+            )
+            return
+
+        async def on_expression(value: str | None) -> None:
+            if value is None:
+                return
+            self.screen_expression = value.strip() or None
+            if self.screen_expression:
+                self.notify(f"Screen: {self.screen_expression}")
+            else:
+                self.notify("Screen cleared.")
+            self._redisplay_price_table()
+
+        self.push_screen(ScreenModal("Screen expression", self.screen_expression), on_expression)
 
     def action_manage_alerts(self) -> None:
         """Opens the alert modal for the selected watchlist row."""

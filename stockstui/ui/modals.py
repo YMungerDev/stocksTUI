@@ -1,12 +1,12 @@
+from textual import on
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label
-from textual.containers import Vertical, Horizontal
-from textual.app import ComposeResult
-from textual import on
 
 # FIX: Changed 'from common import ...' to an absolute import from the package root.
 from stockstui.common import NotEmpty
-from stockstui.utils import slugify, parse_tags, format_tags
+from stockstui.utils import format_tags, parse_tags, slugify
 
 
 class ConfirmDeleteModal(ModalScreen[bool]):
@@ -343,6 +343,44 @@ class CompareInfoModal(ModalScreen[str | None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handles input submission (Enter key), triggering the submit logic."""
         self._submit()
+
+
+class ScreenModal(ModalScreen[str | None]):
+    """A modal to enter (or clear) a watchlist screening expression (#12)."""
+
+    def __init__(self, title: str, current: str | None = None) -> None:
+        super().__init__()
+        self._title = title
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(f"{self._title}:")
+            yield Input(
+                placeholder="e.g. pe_ratio < 20 and off_ath < -0.1",
+                value=self._current or "",
+                id="screen-input",
+            )
+            with Horizontal(id="dialog-buttons"):
+                yield Button("Apply", variant="primary", id="screen-apply")
+                yield Button("Clear", id="screen-clear")
+                yield Button("Cancel", id="screen-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#screen-input", Input).focus()
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "screen-cancel":
+            self.dismiss(None)
+        elif event.button.id == "screen-clear":
+            self.dismiss("")
+        elif event.button.id == "screen-apply":
+            self.dismiss(self.query_one("#screen-input", Input).value)
+
+    @on(Input.Submitted, "#screen-input")
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
 
 
 class PortfolioModal(ModalScreen[tuple[str, str] | None]):

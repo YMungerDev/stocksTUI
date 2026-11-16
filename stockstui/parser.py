@@ -146,6 +146,23 @@ If no list is specified, all tickers are shown.""",
         help="Filter the command-line output by a comma-separated list of tags.",
     )
     parser.add_argument(
+        "--filter",
+        default=None,
+        metavar="EXPR",
+        help=(
+            "Screen tickers with an expression over normalised fields, e.g. "
+            "'pe_ratio < 20 and off_ath < -0.1'. Fields: price, previous_close, "
+            "open, day_low, day_high, volume, market_cap, pe_ratio, eps, beta, "
+            "dividend_yield, fifty_two_week_low/high, all_time_high, off_ath, pct_change."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        default="table",
+        choices=["table", "json", "csv"],
+        help="Output format for -o: table (default), json, or csv.",
+    )
+    parser.add_argument(
         "--session-list",
         nargs="+",
         action=SessionListAction,
