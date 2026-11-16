@@ -202,6 +202,37 @@ def get_market_price_data(
     return final_data
 
 
+# Fields read from yfinance's fast_info when building a price-cache entry.
+_FAST_INFO_FIELDS = (
+    "currency",
+    "lastPrice",
+    "previousClose",
+    "dayLow",
+    "dayHigh",
+    "lastVolume",
+    "open",
+    "shares",
+    "marketCap",
+    "dividendYield",
+)
+
+
+def _materialize_fast_info(fast_info) -> dict:
+    """
+    Reads the fields we use from a (lazy) yfinance fast_info object into a plain dict.
+
+    A field whose lookup raises is left out, so callers' ``.get(key, default)``
+    falls back exactly as it would have on the lazy object.
+    """
+    out: dict = {}
+    for key in _FAST_INFO_FIELDS:
+        try:
+            out[key] = fast_info[key]
+        except Exception:
+            continue
+    return out
+
+
 def _fetch_and_cache_slow_data(tickers: list[str]):
     """
     Fetches full metadata (info + fast_info) for a batch of tickers in parallel.
@@ -225,7 +256,11 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
         """Fetch info for a single ticker. Runs inside the thread pool."""
         try:
             tkr = yf.Ticker(ticker)
-            return ticker, tkr.info, tkr.fast_info
+            # PERF: yfinance's fast_info is lazy -- each field read below can
+            # fire its own HTTP request. Read them here, inside the worker, so
+            # that network time is spent in parallel rather than serially in
+            # the processing loop after the pool has finished.
+            return ticker, tkr.info, _materialize_fast_info(tkr.fast_info)
         except Exception:
             logging.warning(f"Failed to fetch slow data for {ticker}")
             return ticker, None, None
