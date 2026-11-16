@@ -1,16 +1,19 @@
-from textual.containers import Vertical, Horizontal
-from textual.widgets import Button, Input, Label, Select, Switch, ListView, ListItem
+from typing import ClassVar
+
 from textual.app import ComposeResult, on
+from textual.binding import Binding, BindingType
+from textual.containers import Horizontal, Vertical
 from textual.validation import Number
-from textual.binding import Binding
+from textual.widgets import Button, Input, Label, ListItem, ListView, Select, Switch
 
 from stockstui.common import NotEmpty
+from stockstui.ui.view_registry import ORDERED_TOGGLEABLE_SPECIAL_CATEGORIES
 
 
 class GeneralConfigView(Vertical):
     """A view for configuring general application settings and tab visibility."""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("j, down", "focus_next", "Next", show=False),
         Binding("k, up", "focus_previous", "Previous", show=False),
     ]
@@ -106,7 +109,7 @@ class GeneralConfigView(Vertical):
                 all_tabs.extend(list(self.app.config.lists.keys()))
 
             # Add other static tabs
-            all_tabs.extend(["history", "news", "options", "fred", "debug"])
+            all_tabs.extend(ORDERED_TOGGLEABLE_SPECIAL_CATEGORIES)
 
             # Remove duplicates and preserve order (though dict keys are ordered in recent Python)
             seen = set()

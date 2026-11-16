@@ -1,17 +1,61 @@
-from textual.containers import Vertical, Horizontal, Container
-from textual.widgets import Input, RadioButton, Switch, Static, DataTable
-from textual.app import ComposeResult, on
-from textual.dom import NoMatches
-from rich.text import Text
+import logging
+import re
+from typing import Any
 
+from rich.text import Text
+from textual.app import ComposeResult, on
+from textual.containers import Container, Horizontal, Vertical
+from textual.dom import NoMatches
+from textual.widgets import DataTable, Input, RadioButton, Static, Switch
+from textual.widgets.data_table import CellDoesNotExist
+
+from stockstui.presentation import formatter
 from stockstui.ui.suggesters import TickerSuggester
 from stockstui.ui.widgets.history_chart import HistoryChart
 from stockstui.ui.widgets.vim_radio_set import VimRadioSet
-from stockstui.presentation import formatter
+from stockstui.utils import extract_cell_text
+
+logger = logging.getLogger(__name__)
+
+
+def sort_history_table(
+    table: DataTable, sort_column_key: str | None, reverse: bool
+) -> None:
+    """Applies the given sort column and direction to a history DataTable."""
+    if sort_column_key is None:
+        return
+
+    def sort_key(row_values: tuple[Any, ...]) -> tuple[int, Any]:
+        try:
+            column_index = table.get_column_index(sort_column_key)
+        except CellDoesNotExist:
+            return (1, 0)
+        if column_index >= len(row_values):
+            return (1, 0)
+        text_content = extract_cell_text(row_values[column_index])
+        if sort_column_key == "Date":
+            try:
+                return (0, text_content)
+            except (ValueError, TypeError):
+                return (1, "")
+        cleaned_text = re.sub(r"^[^\d\.\-]+", "", text_content).replace(",", "")
+        try:
+            return (0, float(cleaned_text))
+        except (ValueError, TypeError):
+            return (1, 0)
+
+    try:
+        table.sort(key=sort_key, reverse=reverse)
+    except KeyError:
+        logger.error(
+            f"Could not find history column for sort key '{sort_column_key}'"
+        )
 
 
 class HistoryView(Vertical):
     """A view for displaying historical stock data, allowing selection of tickers and time ranges."""
+
+    app: Any
 
     def compose(self) -> ComposeResult:
         """Creates the layout for the historical data view."""
@@ -145,7 +189,7 @@ class HistoryView(Vertical):
                 # Display as a table
                 table = formatter.format_historical_data_as_table(last_data)
                 await display_container.mount(table)
-                self.app._apply_history_table_sort()
+                self.apply_table_sort()
         except NoMatches:
             pass
 
@@ -210,4 +254,29 @@ class HistoryView(Vertical):
     @on(DataTable.HeaderSelected, "#history-table")
     def on_history_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         """Handle header clicks to sort the history table."""
-        self.app._set_and_apply_history_sort(str(event.column_key.value), "click")
+        self.set_and_apply_sort(str(event.column_key.value), "click")
+
+    def apply_table_sort(self) -> None:
+        """Applies the current sort order stored on the app to #history-table."""
+        sort_column_key = getattr(self.app, "_history_sort_column_key", None)
+        reverse = getattr(self.app, "_history_sort_reverse", False)
+        if sort_column_key is None:
+            return
+        try:
+            table = self.query_one("#history-table", DataTable)
+            sort_history_table(table, sort_column_key, reverse)
+        except NoMatches:
+            logger.error(
+                f"Could not find history table for sort key '{sort_column_key}'"
+            )
+
+    def set_and_apply_sort(self, column_key_str: str, source: str) -> None:
+        """Updates the history sort key/direction and sorts #history-table."""
+        if getattr(self.app, "_history_sort_column_key", None) == column_key_str:
+            self.app._history_sort_reverse = not getattr(
+                self.app, "_history_sort_reverse", False
+            )
+        else:
+            self.app._history_sort_column_key = column_key_str
+            self.app._history_sort_reverse = column_key_str == "Date"
+        self.apply_table_sort()
