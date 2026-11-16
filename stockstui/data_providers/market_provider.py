@@ -37,15 +37,54 @@ def _get_calendar(exchange_name: str):
     if exchange_name in _market_calendars:
         return _market_calendars[exchange_name]
     # MAPPING: yfinance exchange codes -> pandas_market_calendars calendar names
+    # An unmapped code that is not itself a calendar name gets no calendar, and
+    # its tickers' metadata then expires hourly (see _calculate_info_expiry),
+    # forcing a slow refetch on almost every launch.
     exchange_map = {
-        "NMS": "NYSE",
+        # US equities, ETFs and indices
+        "NMS": "NYSE",  # Nasdaq Global Select
+        "NGM": "NYSE",  # Nasdaq Global Market
+        "NCM": "NYSE",  # Nasdaq Capital Market
+        "NAS": "NYSE",
         "NYQ": "NYSE",
         "NYS": "NYSE",
-        "GDAX": "CME_Crypto",
+        "PCX": "NYSE",  # NYSE Arca (most ETFs, e.g. SPY)
+        "ASE": "NYSE",  # NYSE American
+        "BTS": "NYSE",  # Cboe BZX
         "SNP": "NYSE",
         "DJI": "NYSE",
         "CBOE": "NYSE",
+        "CXI": "NYSE",  # Cboe indices (^VIX)
+        "WCB": "NYSE",  # ^RUT
         "NIM": "NYSE",
+        # International exchanges and indices
+        "LSE": "XLON",
+        "FGI": "XLON",  # FTSE indices (^FTSE)
+        "GER": "XETR",  # Xetra (^GDAXI)
+        "PAR": "XPAR",
+        "AMS": "XAMS",
+        "MIL": "XMIL",
+        "MCE": "XMAD",
+        "STO": "XSTO",
+        "ZRH": "XSWX",  # ^STOXX50E is reported here
+        "EBS": "XSWX",
+        "OSA": "JPX",  # ^N225
+        "JPX": "JPX",
+        "HKG": "XHKG",
+        "SHH": "XSHG",
+        "SHZ": "XSHG",
+        "KSC": "XKRX",
+        "KOE": "XKRX",
+        "NSI": "XNSE",
+        "BSE": "XBOM",
+        "TOR": "XTSE",
+        "TSI": "XTSE",  # ^GSPTSE
+        "ASX": "ASX",
+        "SAO": "BVMF",
+        "MEX": "XMEX",
+        # Crypto trades around the clock.
+        "CCC": "24/7",
+        "GDAX": "24/7",
     }
     calendar_name = exchange_map.get(exchange_name, exchange_name)
     if mcal is None:
