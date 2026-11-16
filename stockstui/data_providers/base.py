@@ -64,7 +64,7 @@ FALLBACKS: dict[str, str] = {
     "quotes": "in-memory price cache",
     "quotes_live": "in-memory price cache",
     "info": "none",
-    "history": "none (local bar store pending)",
+    "history": "local daily bar store",
     "news": "stale cache",
     "options": "TTL cache",
 }

@@ -1,6 +1,6 @@
 import logging
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -182,6 +182,7 @@ class StocksTUI(App):
 
         market_provider.populate_price_cache(self.db_manager.load_price_cache_from_db())
         market_provider.populate_info_cache(self.db_manager.load_info_cache_from_db())
+        market_provider.set_bar_store(self.db_manager)
 
         self._last_refresh_times: dict[str, str] = {}
         self._available_theme_names: list[str] = []
@@ -427,6 +428,31 @@ class StocksTUI(App):
             self._update_market_status_display(initial_status)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Initial market status fetch failed: {e}")
+
+        self._top_up_daily_bars()
+
+    @work(exclusive=True, thread=True)
+    def _top_up_daily_bars(self) -> None:
+        """
+        Refreshes the local bar store for watchlist tickers in the background.
+
+        Runs after the first price refresh so history views and future
+        computed metrics work offline on the next launch. Errors are
+        non-fatal: the store simply keeps its previous bars.
+        """
+        seen: set[str] = set()
+        tickers: list[str] = []
+        for entries in self.config.lists.values():
+            for entry in entries:
+                ticker = entry.get("ticker", "").upper()
+                if ticker and ticker not in seen:
+                    seen.add(ticker)
+                    tickers.append(ticker)
+        if not tickers:
+            return
+        logger.info(f"Topping up daily bars for {len(tickers)} tickers.")
+        one_year_ago = datetime.now(timezone.utc) - timedelta(days=366)
+        market_provider.refresh_daily_bars(tickers, one_year_ago)
 
     def _get_alias_map(self) -> dict[str, str]:
         return build_alias_map(self.config.lists, self._hidden_tabs)

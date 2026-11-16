@@ -4,11 +4,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from stockstui.data_providers.base import record_outcome
 from stockstui.utils import merge_price_data
+
+# Bars fetched from the network are only trustworthy once a complete session
+# has closed: intraday prices make today's OHLCV provisional, and a yfinance
+# daily row for a still-open session changes as the session progresses.
+_PROVISIONAL_SESSION_DAYS = 1
+
+# How far before the newest stored bar a top-up re-downloads, so adjustment
+# changes in the settled window are detected on every run.
+_TOPUP_OVERLAP_DAYS = 7
+
+
+_db_manager = None
+
+
+def set_bar_store(db_manager) -> None:
+    """Wires the local daily-bar store (the app's DbManager) into the provider."""
+    global _db_manager
+    _db_manager = db_manager
 
 # In-memory cache for storing fetched market data to reduce API calls.
 _price_cache: dict[str, dict[str, Any]] = {}
@@ -672,19 +691,315 @@ def get_market_status(calendar_name="NYSE") -> dict:
         return {"status": "unknown", "is_open": True, "calendar": calendar_name}
 
 
+def _period_start_utc(period: str) -> str | None:
+    """Converts a yfinance period string to a UTC ISO date cutoff, if computable."""
+    if period == "ytd":
+        return datetime.now(timezone.utc).date().replace(month=1, day=1).isoformat()
+    spans = {
+        "5d": 7,
+        "1mo": 31,
+        "3mo": 92,
+        "6mo": 183,
+        "1y": 366,
+        "2y": 731,
+        "5y": 1826,
+        "10y": 3653,
+    }
+    days = spans.get(period)
+    if days is None:
+        return None
+    return (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+
+
+def _split_off_provisional_bars(frame):
+    """
+    Splits a network-returned daily frame into settled and provisional parts.
+
+    The most recent bars are provisional: a still-running session makes
+    today's OHLCV change, and providers keep refining adjustment data around
+    recent sessions. Rows at or after the cutoff are returned separately and
+    must not be persisted.
+    """
+    if frame.empty:
+        return frame, frame.iloc[0:0]
+    index = frame.index
+    if not isinstance(index, pd.DatetimeIndex):
+        # Unknown index layout: treat every bar as provisional rather than
+        # persisting data we cannot date.
+        return frame.iloc[0:0], frame
+    # A bar is provisional while its trading day is within the provisional
+    # window. yfinance stamps daily bars at midnight in the exchange
+    # timezone (naive from yf.download, tz-aware from Ticker.history), so
+    # stripping the tz leaves the trading date itself; comparing calendar
+    # dates stays correct across zones because every session closes on the
+    # UTC calendar date it is stamped with.
+    cutoff_date = (
+        datetime.now(timezone.utc) - timedelta(days=_PROVISIONAL_SESSION_DAYS)
+    ).date()
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    settled_mask = index.normalize() < pd.Timestamp(cutoff_date)
+    return frame[settled_mask], frame[~settled_mask]
+
+
+def _extract_ticker_frame(frame, ticker: str):
+    """Pulls one ticker's sub-DataFrame out of a batched yf.download result."""
+    if not isinstance(frame.columns, pd.MultiIndex):
+        # A flat frame only makes sense when exactly one ticker was requested.
+        return frame
+    level = frame.columns.get_level_values(0)
+    if ticker in level:
+        return frame[ticker]
+    return None
+
+
+def _download_daily_bars(tickers: list[str], start_date: datetime):
+    """
+    One batched yf.download of raw (unadjusted) daily bars since start_date.
+
+    actions=True adds the Dividends and Stock Splits columns, which
+    _detect_new_corporate_actions uses to catch adjustment changes that fall
+    outside the re-downloaded overlap window.
+    """
+    return yf.download(
+        tickers,
+        start=start_date.strftime("%Y-%m-%d"),
+        interval="1d",
+        auto_adjust=False,
+        actions=True,
+        progress=False,
+        group_by="ticker",
+        multi_level_index=True,
+    )
+
+
+def _store_settled_bars(ticker: str, frame) -> int:
+    """Persists the settled rows of a raw daily frame; returns rows stored."""
+    if frame is None or frame.empty:
+        return 0
+    frame = frame.dropna(subset=["Close"])
+    settled, _ = _split_off_provisional_bars(frame)
+    if settled.empty:
+        return 0
+    overlap_start = settled.index.min().date().isoformat()
+    _db_manager.delete_daily_bars(ticker, overlap_start)
+    _db_manager.save_daily_bars(ticker, settled)
+    return len(settled)
+
+
+def _adjusted_closes_diverged(ticker: str, settled) -> bool:
+    """
+    True when stored adjusted closes disagree with freshly fetched ones.
+
+    A split or dividend changes the provider's adjustment factors for the
+    entire history, so stored ratios for older bars go stale. Detecting the
+    divergence on the overlap window triggers a full-range refetch.
+    """
+    if _db_manager is None or settled is None or "Adj Close" not in settled.columns:
+        return False
+    settled = settled.dropna(subset=["Close"])
+    if settled.empty:
+        return False
+    stored = _db_manager.load_daily_bars(ticker)
+    if stored.empty:
+        return False
+    stored_adj = stored.attrs.get("adjclose") or []
+    stored_map = {
+        ts.date().isoformat(): value
+        for ts, value in zip(stored.index, stored_adj)
+        if value is not None
+    }
+    for ts, fresh_value in settled["Adj Close"].items():
+        if fresh_value is None or fresh_value != fresh_value:
+            continue
+        stored_value = stored_map.get(ts.date().isoformat())
+        if stored_value is None:
+            continue
+        try:
+            if abs(float(stored_value) - float(fresh_value)) > max(
+                abs(float(fresh_value)) * 1e-4, 1e-9
+            ):
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def _detect_new_corporate_actions(ticker: str, frame) -> bool:
+    """
+    True when the fetched bars contain a dividend or split after the newest
+    stored bar.
+
+    Adjustment factors apply to the whole history, so any corporate action
+    after the last top-up makes every stored adjusted close stale — including
+    bars outside the overlap window that a pure adjclose comparison cannot
+    see.
+    """
+    if _db_manager is None or frame is None or frame.empty:
+        return False
+    latest_stored = _db_manager.get_latest_bar_date(ticker)
+    if not latest_stored:
+        return False
+    newest_stored = pd.Timestamp(latest_stored).tz_localize("UTC")
+    for column in ("Dividends", "Stock Splits"):
+        if column not in frame.columns:
+            continue
+        series = frame[column].dropna()
+        for timestamp, value in series.items():
+            if float(value) == 0.0:
+                continue
+            ts = timestamp
+            if isinstance(ts, pd.Timestamp):
+                ts = ts.tz_localize(None) if ts.tz is None else ts.tz_convert("UTC")
+            if ts.date() > newest_stored.date():
+                return True
+    return False
+
+
+def _refetch_full_range_on_divergence(ticker: str) -> None:
+    """
+    Re-stores a ticker's full bar range after an adjustment change.
+
+    yfinance adjustment factors apply to the entire history, so when the
+    overlap shows the stored adjusted closes are stale, bars are re-downloaded
+    from the earliest stored date to keep ratios consistent across the range.
+    """
+    all_stored = _db_manager.load_daily_bars(ticker)
+    if all_stored.empty:
+        return
+    earliest = all_stored.index.min().date().isoformat()
+    logging.info(
+        f"Adjusted closes diverged for {ticker}; refetching bars since {earliest}."
+    )
+    frame = _download_daily_bars([ticker], datetime.strptime(earliest, "%Y-%m-%d"))
+    _store_settled_bars(ticker, _extract_ticker_frame(frame, ticker))
+
+
+def refresh_daily_bars(tickers: list[str], start_date: datetime) -> None:
+    """
+    Top up the local bar store for a batch of tickers from the network.
+
+    Fetches bars since start_date for every ticker with a single yf.download
+    call, replaces only settled rows (yesterday and older) in the overlap
+    window, and never raises: the caller already has stored bars, and the
+    offline path must survive provider outages.
+    """
+    if _db_manager is None or not tickers:
+        return
+    try:
+        latest_dates = {ticker: _db_manager.get_latest_bar_date(ticker) for ticker in tickers}
+        # Per the issue, later runs only top up missing days: each ticker's
+        # fetch starts just before its newest stored bar (the overlap lets
+        # _adjusted_closes_diverged spot adjustment changes since the last
+        # run). One batched call uses the earliest needed start across all.
+        needed_starts = [
+            (
+                datetime.strptime(latest_dates[ticker], "%Y-%m-%d")
+                - timedelta(days=_TOPUP_OVERLAP_DAYS)
+            )
+            if latest_dates.get(ticker)
+            else start_date
+            for ticker in tickers
+        ]
+        batch_start = min(needed_starts)
+
+        frame = _download_daily_bars(tickers, batch_start)
+        if frame is None or frame.empty:
+            record_outcome(
+                "history",
+                ok=False,
+                detail=f"{len(tickers)} tickers: no bars from provider",
+                fallback_used=True,
+            )
+            return
+
+        stored_count = 0
+        for ticker in tickers:
+            sub_frame = _extract_ticker_frame(frame, ticker)
+            if sub_frame is None:
+                continue
+            diverged = _adjusted_closes_diverged(
+                ticker, sub_frame
+            ) or _detect_new_corporate_actions(ticker, sub_frame)
+            rows_stored = _store_settled_bars(ticker, sub_frame)
+            if diverged:
+                _refetch_full_range_on_divergence(ticker)
+            if rows_stored:
+                stored_count += 1
+
+        if stored_count:
+            record_outcome(
+                "history",
+                ok=True,
+                detail=f"top-up stored bars for {stored_count}/{len(tickers)} tickers",
+            )
+        else:
+            record_outcome(
+                "history",
+                ok=True,
+                detail=f"{len(tickers)} tickers: top-up found no settled bars",
+            )
+    except Exception as e:  # noqa: BLE001 - offline path must survive provider errors
+        logging.warning(f"Daily bar top-up failed: {e}")
+        record_outcome(
+            "history",
+            ok=False,
+            detail=f"top-up failed ({e})",
+            fallback_used=True,
+        )
+
+
 def get_historical_data(ticker: str, period: str, interval: str = "1d"):
     df = pd.DataFrame()
     df.attrs["symbol"] = ticker.upper()
+    is_daily = interval == "1d"
     try:
         info = get_ticker_info(ticker)
         if not info:
             df.attrs["error"] = "Invalid Ticker"
             record_outcome("history", ok=False, detail=f"{ticker}: invalid ticker")
             return df
-        data = yf.Ticker(ticker).history(period=period, interval=interval)
+
+        data = pd.DataFrame()
+        if is_daily and _db_manager is not None:
+            stored = _db_manager.load_daily_bars(ticker, _period_start_utc(period))
+            if not stored.empty:
+                data = stored
+
+        if not data.empty:
+            # Serve offline from the store, then keep it current for next time.
+            data = _apply_stored_adjustment(data)
+            data.attrs["symbol"] = ticker.upper()
+            data.attrs["currency"] = info.get("currency")
+            data.attrs["source"] = "local bar store"
+            record_outcome(
+                "history", ok=True, detail=f"{ticker} {period}/{interval} (local)"
+            )
+            return data
+
+        # Raw bars with Adj Close: the store keeps raw OHLCV plus the
+        # adjustment factors, and the display applies them (below) to match
+        # yfinance's auto_adjust=True view.
+        data = yf.Ticker(ticker).history(
+            period=period, interval=interval, auto_adjust=False, actions=False
+        )
         if not data.empty:
             data.attrs["symbol"] = ticker.upper()
             data.attrs["currency"] = info.get("currency")
+            if is_daily and _db_manager is not None and "Adj Close" in data.columns:
+                diverged = _adjusted_closes_diverged(ticker, data)
+                rows_stored = _store_settled_bars(ticker, data)
+                if diverged:
+                    _refetch_full_range_on_divergence(ticker)
+                if rows_stored:
+                    record_outcome(
+                        "history",
+                        ok=True,
+                        detail=f"{ticker}: stored {rows_stored} bars",
+                    )
+            # The view always shows adjusted OHLC, store or not: without the
+            # Adj Close column (e.g. intraday) this is a no-op.
+            data = _apply_adj_close_column(data)
             record_outcome("history", ok=True, detail=f"{ticker} {period}/{interval}")
         return data
     except Exception as e:
@@ -694,6 +1009,53 @@ def get_historical_data(ticker: str, period: str, interval: str = "1d"):
         df.attrs["error"] = "Data Error"
         record_outcome("history", ok=False, detail=f"{ticker} {period}: {e}")
         return df
+
+
+def _apply_stored_adjustment(frame):
+    """
+    Applies stored adjusted-close ratios to raw stored bars.
+
+    The store keeps raw OHLCV plus the provider's adjusted close. yfinance
+    serves auto-adjusted OHLC (history defaults to auto_adjust=True), so bars
+    read back from the store are scaled per row by adjclose/close — the same
+    transformation yfinance's utils.auto_adjust performs — keeping displayed
+    history consistent whether it came from the network or the store.
+    """
+    adj = frame.attrs.get("adjclose") or []
+    if frame.empty or not adj:
+        return frame
+    close = frame["Close"].to_numpy(dtype=float)
+    ratios = np.ones(len(frame), dtype=float)
+    for pos, adj_value in enumerate(adj):
+        if adj_value is None or pos >= len(close):
+            continue
+        base = close[pos]
+        if base != base or base == 0:
+            continue
+        try:
+            ratios[pos] = float(adj_value) / base
+        except (TypeError, ValueError):
+            continue
+    adjusted = frame.copy()
+    for column in ("Open", "High", "Low", "Close"):
+        adjusted[column] = frame[column].to_numpy(dtype=float) * ratios
+    return adjusted
+
+
+def _apply_adj_close_column(frame):
+    """
+    Scales OHLC by Adj Close/Close and drops the column.
+
+    Mirrors yfinance's utils.auto_adjust so the history view sees the same
+    adjusted prices it did when the network fetch used auto_adjust=True.
+    """
+    if frame.empty or "Adj Close" not in frame.columns:
+        return frame
+    ratio = (frame["Adj Close"] / frame["Close"]).to_numpy(dtype=float)
+    adjusted = frame.copy()
+    for column in ("Open", "High", "Low", "Close"):
+        adjusted[column] = frame[column].to_numpy(dtype=float) * ratio
+    return adjusted.drop(columns=["Adj Close"])
 
 
 def get_news_for_tickers(tickers: list[str]) -> list[dict] | None:

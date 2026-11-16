@@ -3,10 +3,12 @@ import json
 import logging
 import sqlite3
 import threading
-from pathlib import Path
 from datetime import datetime, timezone
-from stockstui.utils import merge_price_data
+from pathlib import Path
 
+import pandas as pd
+
+from stockstui.utils import merge_price_data
 
 # Only load data into memory if it's less than a day old.
 CACHE_LOAD_DURATION_SECONDS = 86400  # 24 hours
@@ -105,6 +107,22 @@ class DbManager:
                     quantity REAL NOT NULL,
                     avg_cost REAL,
                     timestamp REAL NOT NULL
+                )
+            """)
+            # Daily OHLCV bars are deliberately never pruned: unlike the price
+            # cache they are historical facts, and the offline history path in
+            # market_provider depends on them staying available.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_bars (
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume INTEGER,
+                    adjclose REAL,
+                    PRIMARY KEY (ticker, date)
                 )
             """)
             # Migration guard to add currency column if the table existed but without it.
@@ -213,6 +231,165 @@ class DbManager:
             logging.error(f"Failed to load info cache from database: {e}")
         logging.info(f"Loaded {len(loaded_data)} items from the persistent info cache.")
         return loaded_data
+
+    def load_daily_bars(self, ticker: str, start_date: str | None = None):
+        """
+        Loads stored daily bars for a ticker as an OHLCV DataFrame.
+
+        The index is a tz-aware UTC DatetimeIndex of midnight timestamps; the
+        currency from ticker_info is attached as ``attrs["currency"]`` and the
+        stored adjusted closes (may contain None) as ``attrs["adjclose"]``.
+        Returns an empty DataFrame when the store is unavailable or has no bars
+        in range, so callers fall back to the network.
+        """
+        if not self.conn:
+            return pd.DataFrame()
+        try:
+            cursor = self.conn.cursor()
+            if start_date:
+                cursor.execute(
+                    "SELECT date, open, high, low, close, volume, adjclose "
+                    "FROM daily_bars WHERE ticker = ? AND date >= ? ORDER BY date",
+                    (ticker.upper(), start_date),
+                )
+            else:
+                cursor.execute(
+                    "SELECT date, open, high, low, close, volume, adjclose "
+                    "FROM daily_bars WHERE ticker = ? ORDER BY date",
+                    (ticker.upper(),),
+                )
+            rows = cursor.fetchall()
+            currency_row = None
+            if rows:
+                cursor.execute(
+                    "SELECT currency FROM ticker_info WHERE ticker = ?",
+                    (ticker.upper(),),
+                )
+                currency_row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logging.error(f"Failed to load daily bars for {ticker}: {e}")
+            return pd.DataFrame()
+        if not rows:
+            return pd.DataFrame()
+
+        index = pd.to_datetime([r[0] for r in rows]).tz_localize("UTC")
+        frame = pd.DataFrame(
+            [[r[1], r[2], r[3], r[4], r[5]] for r in rows],
+            index=index,
+            columns=["Open", "High", "Low", "Close", "Volume"],
+        )
+        frame.attrs["adjclose"] = [r[6] for r in rows]
+        frame.attrs["currency"] = (
+            currency_row[0] if currency_row and currency_row[0] else "USD"
+        )
+        return frame
+
+    @_serialized
+    def save_daily_bars(self, ticker: str, bars) -> None:
+        """
+        Upserts daily bars for one ticker.
+
+        ``bars`` is a DataFrame with a DatetimeIndex of daily (midnight)
+        timestamps and Open/High/Low/Close/Volume columns; an optional
+        'Adj Close' column is stored alongside so later launches can detect
+        split/dividend adjustments.
+        """
+        if not self.conn or bars is None:
+            return
+        try:
+            frame = bars
+            adjclose = None
+            if "Adj Close" in frame.columns:
+                adjclose = frame["Adj Close"].tolist()
+                frame = frame.drop(columns=["Adj Close"])
+            if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+                return
+            # The trading date is the timestamp's own calendar date: yfinance
+            # daily bars sit at midnight in the exchange timezone, so no UTC
+            # conversion here (it would shift Asia/Pacific sessions a day back).
+            dates = [d.date().isoformat() for d in frame.index]
+
+            def _num(value):
+                # NaN != NaN, so this maps pandas NaN and None both to NULL.
+                if value is None or value != value:
+                    return None
+                return float(value)
+
+            rows = []
+            for pos, date_str in enumerate(dates):
+                o, h, l, c, v = (
+                    frame["Open"].iloc[pos],
+                    frame["High"].iloc[pos],
+                    frame["Low"].iloc[pos],
+                    frame["Close"].iloc[pos],
+                    frame["Volume"].iloc[pos],
+                )
+                volume = None if v is None or v != v else int(v)
+                rows.append(
+                    (
+                        ticker.upper(),
+                        date_str,
+                        _num(o),
+                        _num(h),
+                        _num(l),
+                        _num(c),
+                        volume,
+                        _num(adjclose[pos]) if adjclose else None,
+                    )
+                )
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.executemany(
+                "INSERT OR REPLACE INTO daily_bars "
+                "(ticker, date, open, high, low, close, volume, adjclose) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self.conn.commit()
+            logging.info(f"Stored {len(rows)} daily bars for {ticker.upper()}.")
+        except sqlite3.Error as e:
+            logging.error(f"Failed to save daily bars for {ticker}: {e}")
+            if self.conn:
+                self.conn.rollback()
+
+    @_serialized
+    def delete_daily_bars(self, ticker: str, start_date: str | None = None) -> None:
+        """Deletes stored bars for a ticker, optionally only from start_date on."""
+        if not self.conn:
+            return
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            if start_date:
+                cursor.execute(
+                    "DELETE FROM daily_bars WHERE ticker = ? AND date >= ?",
+                    (ticker.upper(), start_date),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM daily_bars WHERE ticker = ?", (ticker.upper(),)
+                )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Failed to delete daily bars for {ticker}: {e}")
+            if self.conn:
+                self.conn.rollback()
+
+    def get_latest_bar_date(self, ticker: str) -> str | None:
+        """Returns the newest stored bar date (ISO) for a ticker, if any."""
+        if not self.conn:
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(date) FROM daily_bars WHERE ticker = ?",
+                (ticker.upper(),),
+            )
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else None
+        except sqlite3.Error as e:
+            logging.error(f"Failed to read latest bar date for {ticker}: {e}")
+            return None
 
     @_serialized
     def save_price_cache_to_db(self, cache_data: dict):
