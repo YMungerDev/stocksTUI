@@ -17,6 +17,7 @@ from textual.widgets import (
 )
 
 from stockstui.data_providers import market_provider
+from stockstui.presentation import option_analytics as analytics
 from stockstui.presentation.formatter import get_currency_symbol
 from stockstui.ui.position_modal import PositionModal
 from stockstui.ui.suggesters import TickerSuggester
@@ -354,8 +355,59 @@ class OptionsView(Vertical):
             # Single mount call attaches the entire tree at once
             await display_container.mount(switcher)
 
+            # Analytics summary (#11): implied move for the selected expiry,
+            # put/call ratios, and max pain for the current chain.
+            await self._mount_analytics_summary(
+                display_container, calls_df, puts_df, underlying_price, last_data
+            )
+
         except NoMatches:
             pass
+
+    async def _mount_analytics_summary(
+        self, display_container, calls_df, puts_df, underlying_price, last_data
+    ) -> None:
+        """Renders the analytics summary strip beneath the chain/chart."""
+        try:
+            expiration = last_data.get("expiration", "")
+            days = analytics.days_until(expiration) if expiration else None
+            move = analytics.implied_move(
+                calls_df, puts_df, underlying_price, days
+            )
+            ratios = analytics.put_call_ratios(calls_df, puts_df)
+            pain = analytics.max_pain(calls_df, puts_df)
+            info = (
+                market_provider.get_ticker_info(self.app.options_ticker)
+                if self.app.options_ticker
+                else None
+            )
+            sym = get_currency_symbol(info.get("currency", "USD") if info else "USD")
+
+            def fmt(value, suffix=""):
+                if value is None or (
+                    isinstance(value, float) and math.isnan(value)
+                ):
+                    return "N/A"
+                return f"{value:,.2f}{suffix}"
+
+            parts: list[str] = []
+            if move:
+                parts.append(
+                    f"Implied move: ±{sym}{move['move']:,.2f}"
+                    f" (±{move['move_pct']:.1f}%)"
+                )
+            parts.append(f"P/C Vol: {fmt(ratios.get('put_call_volume'), 'x')}")
+            parts.append(f"P/C OI: {fmt(ratios.get('put_call_open_interest'), 'x')}")
+            if pain is not None:
+                parts.append(f"Max pain: {sym}{pain:,.0f}")
+            if days is not None:
+                parts.append(f"{days}d to expiry")
+
+            await display_container.mount(
+                Static("  |  ".join(parts), classes="options-analytics-header")
+            )
+        except Exception as e:  # noqa: BLE001 - analytics must not break render
+            self.app.notify(f"Analytics unavailable: {e}", severity="warning")
 
     def action_toggle_chart(self):
         """Toggles between the table view and the chart view."""
@@ -375,6 +427,22 @@ class OptionsView(Vertical):
             select = self.query_one("#options-expiration-select", Select)
             if expirations:
                 options = [(exp, exp) for exp in expirations]
+                # Highlight the expiry spanning the cached next earnings
+                # date (#11): an [E] mark when earnings falls on/before the
+                # expiry but after the previous one.
+                next_earnings = self._next_earnings_date()
+                if next_earnings is not None:
+                    options = [
+                        (
+                            (
+                                f"{exp}  [E]"
+                                if self._spans_earnings(exp, expirations, next_earnings)
+                                else exp
+                            ),
+                            exp,
+                        )
+                        for exp in expirations
+                    ]
                 select.set_options(options)
                 select.disabled = False
                 if options:
@@ -384,6 +452,24 @@ class OptionsView(Vertical):
                 select.disabled = True
         except NoMatches:
             pass
+
+    def _next_earnings_date(self) -> str | None:
+        """The cached next-earnings ISO date string for the current ticker."""
+        cached = market_provider.get_cached_price(self.app.options_ticker or "")
+        if not cached:
+            return None
+        return cached.get("next_earnings")
+
+    @staticmethod
+    def _spans_earnings(expiry: str, expirations: list[str], earnings_iso: str) -> bool:
+        """True when earnings falls between this expiry and the previous one."""
+        try:
+            position = expirations.index(expiry)
+            return earnings_iso <= expiry and (
+                position == 0 or earnings_iso > expirations[position - 1]
+            )
+        except (ValueError, TypeError):
+            return False
 
     def action_prev_expiration(self):
         """Selects the previous expiration date."""
