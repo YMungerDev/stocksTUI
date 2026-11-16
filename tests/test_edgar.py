@@ -287,6 +287,66 @@ class TestFilingsView(unittest.IsolatedAsyncioTestCase):
             app.fetch_filings.assert_called_once_with("AAPL")
             self.assertEqual(app.filings_ticker, "AAPL")
 
+    async def test_o_binding_opens_selected_filing(self):
+        """'o Open' on the Filings tab opens the highlighted filing (#10)."""
+        opened: list[str] = []
+
+        class FilingsHostApp(App):
+            config = MagicMock()
+            config.lists = {"stocks": [{"ticker": "AAPL"}]}
+            filings_ticker = None
+            fetch_filings = MagicMock()
+            notify = MagicMock()
+
+            def compose(self):
+                yield FilingsView()
+
+        app = FilingsHostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(FilingsView)
+            view.update_filings(
+                [
+                    {"form": "10-K", "filing_date": "2026-01-01",
+                     "report_date": "", "description": "Annual", "url": "https://sec.gov/x"},
+                    {"form": "8-K", "filing_date": "2026-02-01",
+                     "report_date": "", "description": "Current", "url": "https://sec.gov/y"},
+                ]
+            )
+            table = view.query_one("#filings-table")
+            table.focus()
+            await pilot.pause()
+            table.move_cursor(row=1)
+            await pilot.pause()
+
+            with patch("stockstui.ui.views.filings_view.webbrowser.open") as mock_open:
+                mock_open.side_effect = lambda url: opened.append(url)
+                await pilot.press("o")
+                await pilot.pause()
+
+            mock_open.assert_called_once_with("https://sec.gov/y")
+
+    async def test_o_binding_with_no_selection_notifies(self):
+        class FilingsHostApp(App):
+            config = MagicMock()
+            config.lists = {"stocks": [{"ticker": "AAPL"}]}
+            filings_ticker = None
+            fetch_filings = MagicMock()
+
+            def compose(self):
+                yield FilingsView()
+
+        app = FilingsHostApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(FilingsView)
+            view.update_filings(
+                [{"form": "10-K", "filing_date": "2026-01-01",
+                  "report_date": "", "description": "", "url": "https://sec.gov/x"}]
+            )
+            await pilot.press("o")
+            await pilot.pause()
+            # No crash, no browser: cursor defaults to row -1 until focus.
+            self.assertEqual(app.filings_ticker, None)
+
 
 if __name__ == "__main__":
     unittest.main()

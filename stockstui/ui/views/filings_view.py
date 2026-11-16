@@ -39,6 +39,9 @@ class FilingsView(Vertical):
 
     BINDINGS = [
         Binding("enter", "open_filing", "Open Filing", show=False),
+        # The global footer binding 'o Open' only handles watchlist open
+        # mode; on this tab 'o' must open the highlighted filing itself.
+        Binding("o", "open_filing", "Open Filing", show=True),
     ]
 
     def __init__(self, **kwargs):
@@ -131,6 +134,7 @@ class FilingsView(Vertical):
         try:
             table = self.query_one("#filings-table", NavigableDataTable)
             if table.cursor_row < 0:
+                self.notify("Select a filing first.", severity="information")
                 return
             visible = edgar_provider.filter_filings_by_form(
                 self._filings, self._category
