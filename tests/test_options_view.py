@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, Mock
+
 from textual.app import App
-from textual.widgets import Select, ContentSwitcher, Input, DataTable
+from textual.widgets import ContentSwitcher, DataTable, Input, Select
 
 from stockstui.ui.views.options_view import OptionsView
 
@@ -317,6 +318,7 @@ class TestOptionsView(unittest.IsolatedAsyncioTestCase):
 
             # Temporarily disable the chart creation by mocking the OIChart constructor
             from unittest.mock import patch
+
             from stockstui.ui.widgets.oi_chart import OIChart
 
             with patch.object(OIChart, "replot", return_value=None):
@@ -509,3 +511,148 @@ class TestOptionsView(unittest.IsolatedAsyncioTestCase):
             Button.Pressed(button)
             # Call the method without the event parameter since it only takes 'self'
             view.on_toggle_chart_pressed()
+
+
+class TestOptionsRenderCorrectness(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for chain rendering correctness and staleness."""
+
+    def _make_chain_data(self, ticker: str, strike: float = 400.0, last: float = 50.0):
+        import pandas as pd
+
+        calls = pd.DataFrame(
+            {
+                "contractSymbol": [f"{ticker}270115C00{int(strike*1000):08d}"],
+                "strike": [strike],
+                "lastPrice": [last],
+                "bid": [last - 1.0],
+                "ask": [last + 1.0],
+                "percentChange": [1.2],
+                "volume": [100],
+                "openInterest": [200],
+                "impliedVolatility": [0.5],
+                "delta": [0.5],
+                "gamma": [0.01],
+                "theta": [-0.05],
+                "vega": [0.45],
+            }
+        )
+        puts = calls.copy()
+        puts["contractSymbol"] = [f"{ticker}270115P00{int(strike*1000):08d}"]
+        return {
+            "ticker": ticker,
+            "expiration": "2027-01-15",
+            "calls": calls,
+            "puts": puts,
+            "underlying": {"regularMarketPrice": strike + 5.0},
+        }
+
+    async def test_stale_chain_is_ignored_after_ticker_switch(self):
+        """A slow fetch for an abandoned ticker must not clobber the view."""
+        from stockstui.common import OptionsDataUpdated
+        from stockstui.main import StocksTUI
+
+        app = OptionsViewTestApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(OptionsView)
+
+            # User asked for TSLA, then switched to SAP.DE before it arrived.
+            stale = self._make_chain_data("TSLA", strike=400.0, last=50.0)
+            message = OptionsDataUpdated(
+                "TSLA", "2027-01-15", stale["calls"], stale["puts"], stale["underlying"]
+            )
+            app.options_ticker = "SAP.DE"
+            await StocksTUI.on_options_data_updated(app, message)
+            await pilot.pause()
+
+            # The display container must NOT have mounted chain tables for TSLA.
+            from textual.widgets import Static
+
+            container = view.query_one("#options-display-container")
+            has_tables = any(
+                c.id in ("options-calls-table", "options-puts-table")
+                for c in container.children
+            )
+            self.assertFalse(
+                has_tables,
+                "Stale chain for abandoned ticker was rendered",
+            )
+
+    async def test_currency_resolves_from_chain_ticker_not_current_selection(self):
+        """Rendered currency must come from the chain's own ticker."""
+        from stockstui.data_providers import market_provider
+
+        market_provider._info_cache["TSLA"] = {"currency": "USD", "exchange": "NMS"}
+        market_provider._info_cache["SAP.DE"] = {"currency": "EUR", "exchange": "FRA"}
+        app = OptionsViewTestApp()
+        app.options_ticker = "SAP.DE"
+        app._last_options_data = self._make_chain_data("TSLA", strike=400.0, last=50.0)
+        async with app.run_test() as pilot:
+            view = app.query_one(OptionsView)
+            await view._render_options_data()
+            await pilot.pause()
+
+            dt = view.query_one("#options-calls-table", DataTable)
+            col_keys = list(dt.columns.keys())
+            last_cell = str(dt.get_cell(dt.ordered_rows[0].key, col_keys[1]))
+            self.assertTrue(
+                last_cell.startswith("$"),
+                f"TSLA USD chain rendered with non-USD symbol: {last_cell!r}",
+            )
+
+        market_provider._info_cache.pop("TSLA", None)
+        market_provider._info_cache.pop("SAP.DE", None)
+
+    async def test_nan_fields_render_as_dash(self):
+        """NaN last/bid/ask/percentChange must render as em dash, not $nan."""
+        import pandas as pd
+
+        from stockstui.data_providers import market_provider
+
+        market_provider._info_cache["AAPL"] = {"currency": "USD", "exchange": "NMS"}
+        data = self._make_chain_data("AAPL", strike=350.0, last=16.94)
+        data["calls"]["lastPrice"] = [float("nan")]
+        data["calls"]["bid"] = [float("nan")]
+        data["calls"]["ask"] = [float("nan")]
+        data["calls"]["percentChange"] = [float("nan")]
+        app = OptionsViewTestApp()
+        app.options_ticker = "AAPL"
+        app._last_options_data = data
+        async with app.run_test() as pilot:
+            view = app.query_one(OptionsView)
+            await view._render_options_data()
+            await pilot.pause()
+
+            dt = view.query_one("#options-calls-table", DataTable)
+            col_keys = list(dt.columns.keys())
+            cells = [str(dt.get_cell(dt.ordered_rows[0].key, k)) for k in col_keys]
+            self.assertEqual(cells[1], "—")  # Last
+            self.assertEqual(cells[2], "—")  # Bid
+            self.assertEqual(cells[3], "—")  # Ask
+            self.assertEqual(cells[4], "—")  # Chg %
+
+        market_provider._info_cache.pop("AAPL", None)
+
+    async def test_position_pl_with_nan_last_renders_dash(self):
+        import pandas as pd
+
+        from stockstui.data_providers import market_provider
+
+        market_provider._info_cache["AAPL"] = {"currency": "USD", "exchange": "NMS"}
+        data = self._make_chain_data("AAPL", strike=350.0, last=float("nan"))
+        contract = data["calls"]["contractSymbol"].iloc[0]
+        app = OptionsViewTestApp()
+        app.options_ticker = "AAPL"
+        app.option_positions = {contract: {"quantity": 2, "avg_cost": 5.0}}
+        app._last_options_data = data
+        async with app.run_test() as pilot:
+            view = app.query_one(OptionsView)
+            await view._render_options_data()
+            await pilot.pause()
+
+            dt = view.query_one("#options-calls-table", DataTable)
+            col_keys = list(dt.columns.keys())
+            cells = [str(dt.get_cell(dt.ordered_rows[0].key, k)) for k in col_keys]
+            self.assertEqual(cells[12], "2")  # Pos
+            self.assertEqual(cells[13], "—")  # P/L must not be $nan
+
+        market_provider._info_cache.pop("AAPL", None)

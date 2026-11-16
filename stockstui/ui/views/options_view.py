@@ -1,25 +1,26 @@
 import math
 from datetime import datetime
-from textual.containers import Vertical, Horizontal, Container
+
+from rich.text import Text
+from textual.app import ComposeResult, on
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical
+from textual.dom import NoMatches
 from textual.widgets import (
-    Input,
-    Select,
-    Static,
-    DataTable,
-    Label,
     Button,
     ContentSwitcher,
+    DataTable,
+    Input,
+    Label,
+    Select,
+    Static,
 )
-from textual.app import ComposeResult, on
-from textual.dom import NoMatches
-from rich.text import Text
-from textual.binding import Binding
 
-from stockstui.ui.suggesters import TickerSuggester
-from stockstui.ui.position_modal import PositionModal
-from stockstui.ui.widgets.oi_chart import OIChart
 from stockstui.data_providers import market_provider
 from stockstui.presentation.formatter import get_currency_symbol
+from stockstui.ui.position_modal import PositionModal
+from stockstui.ui.suggesters import TickerSuggester
+from stockstui.ui.widgets.oi_chart import OIChart
 
 
 class OptionsView(Vertical):
@@ -35,6 +36,17 @@ class OptionsView(Vertical):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.expirations = []
+
+    @staticmethod
+    def _clean_number(value, fmt: str) -> str:
+        """Formats a number, rendering NaN/None as an em dash."""
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        if math.isnan(value_f):
+            return "—"
+        return fmt.format(value_f)
 
     def compose(self) -> ComposeResult:
         """Creates the layout for the options view."""
@@ -136,8 +148,11 @@ class OptionsView(Vertical):
             # Get underlying price for ITM/OTM calculations
             underlying_price = underlying_data.get("regularMarketPrice", 0)
 
-            # Resolve currency code from underlying info cache or provider
-            info = market_provider.get_ticker_info(self.app.options_ticker) if self.app.options_ticker else None
+            # Resolve currency from the ticker the chain actually belongs to,
+            # not the app's current selection (they can diverge while a fetch
+            # is in flight, which mislabeled USD prices with another currency).
+            chain_ticker = last_data.get("ticker") or self.app.options_ticker
+            info = market_provider.get_ticker_info(chain_ticker) if chain_ticker else None
             currency_code = info.get("currency", "USD") if info else "USD"
             sym = get_currency_symbol(currency_code)
 
@@ -216,19 +231,33 @@ class OptionsView(Vertical):
                         strike_text.stylize(f"bold {accent_color} reverse")
 
                     last_price = row.get("lastPrice", 0)
-                    last_text = f"{sym}{last_price:.2f}"
-                    bid = f"{sym}{row.get('bid', 0):.2f}"
-                    ask = f"{sym}{row.get('ask', 0):.2f}"
+                    last_text = (
+                        f"{sym}{last_price:.2f}"
+                        if isinstance(last_price, (int, float))
+                        and not (isinstance(last_price, float) and math.isnan(last_price))
+                        else "—"
+                    )
+                    bid = self._clean_number(row.get("bid", 0), f"{sym}{{:.2f}}")
+                    ask = self._clean_number(row.get("ask", 0), f"{sym}{{:.2f}}")
 
                     # % Change
                     pct_change_val = row.get("percentChange", 0)
-                    pct_change_text = Text(f"{pct_change_val:.1f}%")
-                    if pct_change_val > 0:
-                        pct_change_text.stylize(success_color)
-                    elif pct_change_val < 0:
-                        pct_change_text.stylize(error_color)
+                    if (
+                        isinstance(pct_change_val, (int, float))
+                        and not (
+                            isinstance(pct_change_val, float)
+                            and math.isnan(pct_change_val)
+                        )
+                    ):
+                        pct_change_text = Text(f"{pct_change_val:.1f}%")
+                        if pct_change_val > 0:
+                            pct_change_text.stylize(success_color)
+                        elif pct_change_val < 0:
+                            pct_change_text.stylize(error_color)
+                        else:
+                            pct_change_text.stylize(muted_color)
                     else:
-                        pct_change_text.stylize(muted_color)
+                        pct_change_text = Text("—", style=muted_color)
 
                     # Handle NaN values for volume and openInterest
                     volume_val = row.get("volume", 0)
@@ -264,13 +293,17 @@ class OptionsView(Vertical):
 
                         # Calculate P/L
                         # P/L = (Current Price - Avg Cost) * Qty * 100
-                        current_val = last_price
-                        pl_val = (current_val - avg_cost) * qty * 100
-                        pl_text = Text(f"{sym}{pl_val:,.0f}")
-                        if pl_val > 0:
-                            pl_text.stylize(success_color)
-                        elif pl_val < 0:
-                            pl_text.stylize(error_color)
+                        if isinstance(last_price, (int, float)) and not (
+                            isinstance(last_price, float) and math.isnan(last_price)
+                        ):
+                            pl_val = (last_price - avg_cost) * qty * 100
+                            pl_text = Text(f"{sym}{pl_val:,.0f}")
+                            if pl_val > 0:
+                                pl_text.stylize(success_color)
+                            elif pl_val < 0:
+                                pl_text.stylize(error_color)
+                        else:
+                            pl_text = Text("—", style=muted_color)
 
                     table.add_row(
                         strike_text,

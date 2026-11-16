@@ -47,8 +47,7 @@ from stockstui.common import (
     TickerInfoComparisonUpdated,
 )
 from stockstui.config_manager import ConfigManager
-from stockstui.data_providers import market_provider, options_provider
-from stockstui.data_providers import edgar_provider
+from stockstui.data_providers import edgar_provider, market_provider, options_provider
 from stockstui.data_providers.portfolio import PortfolioManager
 from stockstui.database.db_manager import DbManager
 from stockstui.log_handler import TextualHandler
@@ -68,7 +67,6 @@ from stockstui.ui.view_registry import (
 )
 from stockstui.ui.views.calendar_view import CalendarView
 from stockstui.ui.views.config_view import ConfigContainer
-from stockstui.ui.views.filings_view import FilingsView
 from stockstui.ui.views.config_views.general_config_view import GeneralConfigView
 from stockstui.ui.views.config_views.lists_config_view import ListsConfigView
 from stockstui.ui.views.debug_view import (
@@ -79,6 +77,7 @@ from stockstui.ui.views.debug_view import (
     populate_list_debug_table,
     populate_ticker_debug_table,
 )
+from stockstui.ui.views.filings_view import FilingsView
 from stockstui.ui.views.fred_view import FredView
 from stockstui.ui.views.history_view import HistoryView, sort_history_table
 from stockstui.ui.views.news_view import NewsView
@@ -1119,6 +1118,11 @@ class StocksTUI(App):
 
     @on(OptionsDataUpdated)
     async def on_options_data_updated(self, message: OptionsDataUpdated) -> None:
+        if self.options_ticker != message.ticker:
+            # A slow chain fetch for a ticker the user already switched away
+            # from must not clobber the current view (expirations handler
+            # has the same guard).
+            return
         try:
             self.query_one("#options-display-container").loading = False
         except NoMatches:
