@@ -41,10 +41,14 @@ def collect_upcoming_events(
                 continue
             alias = entry.get("alias") or cached.get("description") or ticker
             events: list[tuple[date, str, str]] = []
-            if earnings := cached.get("next_earnings"):
-                events.append((earnings, "Earnings", _format_date(earnings)))
-            if ex_div := cached.get("ex_dividend"):
-                events.append((ex_div, "Ex-Dividend", _format_date(ex_div)))
+            for cache_key, event_type in (
+                ("next_earnings", "Earnings"),
+                ("ex_dividend", "Ex-Dividend"),
+            ):
+                if raw_date := cached.get(cache_key):
+                    parsed = _parse_event_date(raw_date)
+                    if parsed is not None:
+                        events.append((parsed, event_type, parsed.isoformat()))
             for event_date, event_type, date_str in events:
                 if event_date < today:
                     continue
@@ -62,12 +66,16 @@ def collect_upcoming_events(
     return rows
 
 
-def _format_date(value) -> str:
+def _parse_event_date(value) -> date | None:
+    """Parses a stored event date (ISO string or date) to a date."""
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return value.date()
     if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 class CalendarView(Vertical):

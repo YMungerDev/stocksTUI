@@ -672,9 +672,9 @@ def get_ticker_calendar(ticker: str) -> dict[str, Any] | None:
     processed: dict[str, Any] = {}
     earnings_dates = calendar.get("Earnings Date") or []
     if earnings_dates:
-        processed["earnings_date"] = min(earnings_dates)
+        processed["earnings_date"] = min(earnings_dates).isoformat()
     if ex_div := calendar.get("Ex-Dividend Date"):
-        processed["ex_dividend_date"] = ex_div
+        processed["ex_dividend_date"] = ex_div.isoformat()
     if div := calendar.get("Dividend Date"):
         processed["dividend_date"] = div
     _calendar_cache[normalized_ticker] = (now, processed)

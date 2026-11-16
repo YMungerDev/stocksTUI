@@ -62,8 +62,10 @@ class TestEventColumns(unittest.TestCase):
                 {
                     "symbol": "AAPL",
                     "description": "Apple",
-                    "next_earnings": date(2026, 12, 15),
-                    "ex_dividend": datetime(2026, 11, 12, 9, 30),
+                    # Provider stores ISO strings so the cache survives
+                    # JSON serialization (a date object broke db writes).
+                    "next_earnings": "2026-12-15",
+                    "ex_dividend": "2026-11-12",
                 },
                 {
                     "symbol": "SPY",
@@ -137,7 +139,7 @@ class TestCalendarProvider(unittest.TestCase):
         second = market_provider.get_ticker_calendar("AAPL")
 
         mock_yf_ticker.assert_called_once()
-        self.assertEqual(first["earnings_date"], date(2027, 1, 28))
+        self.assertEqual(first["earnings_date"], "2027-01-28")
         self.assertEqual(second, first)
 
     @patch("stockstui.data_providers.market_provider.yf.Ticker")
@@ -163,7 +165,7 @@ class TestCalendarProvider(unittest.TestCase):
 
         result = market_provider.get_ticker_calendar("AAPL")
 
-        self.assertEqual(result["earnings_date"], date(2027, 1, 28))
+        self.assertEqual(result["earnings_date"], "2027-01-28")
 
     @patch("stockstui.data_providers.market_provider.yf.Ticker")
     def test_calendar_error_returns_none(self, mock_yf_ticker):
@@ -173,6 +175,21 @@ class TestCalendarProvider(unittest.TestCase):
         )
 
         self.assertIsNone(market_provider.get_ticker_calendar("AAPL"))
+
+    @patch("stockstui.data_providers.market_provider.yf.Ticker")
+    def test_calendar_values_are_json_serializable(self, mock_yf_ticker):
+        """Smoke test found dates blowing up the DB write; pin ISO strings."""
+        import json
+
+        mock_yf_ticker.return_value.calendar = {
+            "Earnings Date": [date(2027, 1, 28)],
+            "Ex-Dividend Date": date(2026, 11, 12),
+        }
+
+        result = market_provider.get_ticker_calendar("AAPL")
+
+        json.dumps(result)  # must not raise
+        self.assertEqual(result["earnings_date"], "2027-01-28")
 
     @patch("stockstui.data_providers.market_provider.yf.Ticker")
     def test_slow_fetch_includes_event_dates_in_cache(self, mock_yf_ticker):
@@ -192,8 +209,8 @@ class TestCalendarProvider(unittest.TestCase):
         market_provider._fetch_and_cache_slow_data(["AAPL"])
 
         cached = market_provider.get_cached_price("AAPL")
-        self.assertEqual(cached["next_earnings"], date(2027, 1, 28))
-        self.assertEqual(cached["ex_dividend"], date(2026, 11, 12))
+        self.assertEqual(cached["next_earnings"], "2027-01-28")
+        self.assertEqual(cached["ex_dividend"], "2026-11-12")
 
     @patch("stockstui.data_providers.market_provider.yf.Ticker")
     def test_slow_fetch_clears_stale_event_dates(self, mock_yf_ticker):
@@ -214,6 +231,26 @@ class TestCalendarProvider(unittest.TestCase):
         cached = market_provider.get_cached_price("AAPL")
         self.assertNotIn("next_earnings", cached)
 
+    @patch("stockstui.data_providers.market_provider.yf.Ticker")
+    def test_price_cache_round_trips_through_json(self, mock_yf_ticker):
+        """The full slow-fetch entry must survive save/load JSON cycles."""
+        import json
+
+        ticker_obj = MagicMock()
+        ticker_obj.info = {"currency": "USD", "exchange": "NMS"}
+        ticker_obj.fast_info = {"lastPrice": 155.0}
+        ticker_obj.calendar = {
+            "Earnings Date": [date(2027, 1, 28)],
+            "Ex-Dividend Date": date(2026, 11, 12),
+        }
+        mock_yf_ticker.return_value = ticker_obj
+
+        market_provider._fetch_and_cache_slow_data(["AAPL"])
+
+        entry = market_provider._price_cache["AAPL"]
+        restored = json.loads(json.dumps(entry["data"]))
+        self.assertEqual(restored["next_earnings"], "2027-01-28")
+
 
 class TestCalendarTab(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -224,19 +261,21 @@ class TestCalendarTab(unittest.IsolatedAsyncioTestCase):
 
     def test_collect_upcoming_events_sorts_and_filters(self):
         today = date.today()
+        tomorrow = (today + timedelta(days=1)).isoformat()
+        in_five = (today + timedelta(days=5)).isoformat()
         market_provider._price_cache["AAPL"] = {
             "data": {
                 "symbol": "AAPL",
                 "description": "Apple Inc.",
-                "next_earnings": today + timedelta(days=5),
-                "ex_dividend": today - timedelta(days=2),
+                "next_earnings": in_five,
+                "ex_dividend": (today - timedelta(days=2)).isoformat(),
             }
         }
         market_provider._price_cache["MSFT"] = {
             "data": {
                 "symbol": "MSFT",
                 "description": "Microsoft",
-                "next_earnings": today + timedelta(days=1),
+                "next_earnings": tomorrow,
             }
         }
         market_provider._price_cache["SPY"] = {
@@ -290,7 +329,7 @@ class TestCalendarTab(unittest.IsolatedAsyncioTestCase):
             "data": {
                 "symbol": "AAPL",
                 "description": "Apple",
-                "next_earnings": date.today() + timedelta(days=2),
+                "next_earnings": (date.today() + timedelta(days=2)).isoformat(),
             }
         }
 
