@@ -133,6 +133,16 @@ KEYBINDINGS
     News View
       Tab           Cycle focus to the next news article link.
       Shift+Tab     Cycle focus to the previous link.
+
+    History View (chart mode)
+      Ctrl+M        Toggle the 50-day moving average overlay.
+      Ctrl+N        Toggle the 200-day moving average overlay.
+      Ctrl+T        Toggle the volume overlay.
+      Ctrl+O        Toggle the drawdown-from-peak overlay.
+      Ctrl+Y        Toggle earnings-date markers.
+
+    Watchlist View
+      a             Manage price alerts for the selected ticker.
       Enter         Open the currently highlighted link in your default web browser.
 
 CONFIGURATION

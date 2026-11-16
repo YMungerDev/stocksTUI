@@ -4,6 +4,7 @@ from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult, on
+from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.dom import NoMatches
 from textual.widgets import DataTable, Input, RadioButton, Static, Switch
@@ -54,6 +55,16 @@ def sort_history_table(
 
 class HistoryView(Vertical):
     """A view for displaying historical stock data, allowing selection of tickers and time ranges."""
+
+    BINDINGS = [
+        # ctrl+<n> avoids app-level bindings (plain letters are sort-mode or
+        # view actions, digits switch tabs — both consumed by the app first).
+        Binding("ctrl+m", "toggle_overlay('sma50')", "50d MA", show=True),
+        Binding("ctrl+n", "toggle_overlay('sma200')", "200d MA", show=True),
+        Binding("ctrl+t", "toggle_overlay('volume')", "Volume", show=True),
+        Binding("ctrl+o", "toggle_overlay('drawdown')", "Drawdown", show=True),
+        Binding("ctrl+y", "toggle_overlay('earnings')", "Earnings", show=True),
+    ]
 
     app: Any
 
@@ -132,6 +143,33 @@ class HistoryView(Vertical):
             self.call_after_refresh(self._request_historical_data)
         else:
             self.call_after_refresh(self._render_historical_data)
+
+    def action_toggle_overlay(self, overlay: str) -> None:
+        """
+        Toggles a chart overlay on the currently displayed chart.
+
+        Turning on the 200-day SMA while the visible window is shorter than
+        a year refetches with a wider period instead of silently drawing
+        nothing.
+        """
+        try:
+            chart = self.query_one(HistoryChart)
+            chart.toggle_overlay(overlay)
+            if overlay == "sma200" and chart._overlay_states["sma200"]:
+                if not self.app._history_period:
+                    return
+                from stockstui.presentation.overlays import moving_average
+
+                closes = (
+                    self.app._last_historical_data["Close"]
+                    if self.app._last_historical_data is not None
+                    and "Close" in self.app._last_historical_data
+                    else None
+                )
+                if closes is None or moving_average(closes, 200) is None:
+                    self._request_historical_data()
+        except NoMatches:
+            self.app.bell()
 
     async def _render_historical_data(self):
         """
@@ -220,10 +258,24 @@ class HistoryView(Vertical):
                     # Use a 5-minute interval for the 1D period, otherwise default to daily.
                     interval = "5m" if button_label == "1D" else "1d"
 
+                    # The 200-day SMA needs more history than shorter
+                    # periods provide; fetch a year so the average is not
+                    # truncated (per #8's acceptance criteria).
+                    fetch_period = period
+                    try:
+                        chart = self.query_one(HistoryChart)
+                        if (
+                            chart._overlay_states.get("sma200")
+                            and period not in ("1y", "5y", "max")
+                        ):
+                            fetch_period = "1y"
+                    except NoMatches:
+                        pass
+
                     display_container = self.query_one("#history-display-container")
                     display_container.loading = True  # Show loading indicator
                     self.app.fetch_historical_data(
-                        self.app.history_ticker, period, interval
+                        self.app.history_ticker, fetch_period, interval
                     )
         except NoMatches:
             pass

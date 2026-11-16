@@ -2,6 +2,13 @@ import pandas as pd
 import numpy as np
 from textual_plotext import PlotextPlot
 
+from stockstui.presentation.overlays import (
+    drawdown_from_peak,
+    earnings_dates_in_range,
+    moving_average,
+    relative_volume_series,
+)
+
 
 class HistoryChart(PlotextPlot):
     """A custom widget to display a historical stock chart using plotext."""
@@ -18,9 +25,26 @@ class HistoryChart(PlotextPlot):
         super().__init__(*args, **kwargs)
         self._data = data
         self._period = period
+        self._overlay_states = {
+            "sma50": False,
+            "sma200": False,
+            "volume": False,
+            "drawdown": False,
+            "earnings": False,
+        }
+
+    def toggle_overlay(self, overlay: str) -> None:
+        """Toggles one overlay and redraws (called from the view's keybindings)."""
+        if overlay in self._overlay_states:
+            self._overlay_states[overlay] = not self._overlay_states[overlay]
+            self.replot()
 
     def on_mount(self) -> None:
         """Draws the plot when the widget is mounted to the application."""
+        self.replot()
+
+    def replot(self) -> None:
+        """Draws (or redraws) the price line and any active overlays."""
         plt = self.plt  # Get the plotext plotting object
         plt.clear_data()  # Clear any existing data from the plot
 
@@ -41,9 +65,59 @@ class HistoryChart(PlotextPlot):
         else:
             return  # No data to plot
 
-        # Get color from theme, defaulting to orange if not found
-        line_color = self.app.theme_variables.get("orange", "orange")
-        plt.plot(x_data, y_data, color=line_color)  # Plot the price history
+        closes = pd.Series(y_data, index=self._data.index, dtype=float)
+        theme_vars = self.app.theme_variables
+        price_color = theme_vars.get("orange", "orange")
+        accent_color = theme_vars.get("accent", "blue")
+        muted_color = theme_vars.get("text-muted", "dim")
+        success_color = theme_vars.get("success", "green")
+        error_color = theme_vars.get("error", "red")
+        warning_color = theme_vars.get("warning", "yellow")
+
+        # Plot the price history first so overlays draw on top.
+        plt.plot(x_data, y_data, color=price_color, label="Close")
+
+        # Moving averages: drawn only when a full window of closes exists,
+        # so the line never shows a truncated average.
+        for key, window, color in (
+            ("sma50", 50, accent_color),
+            ("sma200", 200, warning_color),
+        ):
+            if self._overlay_states.get(key):
+                sma = moving_average(closes, window)
+                if sma is not None:
+                    sma_x = [d.timestamp() for d in sma.index]
+                    plt.plot(sma_x, sma.tolist(), color=color, label=f"SMA{window}")
+
+        # Volume panel below the price plot.
+        if self._overlay_states.get("volume") and "Volume" in self._data.columns:
+            volumes = self._data["Volume"].astype(float)
+            plt.plot(
+                x_data,
+                volumes.tolist(),
+                color=muted_color,
+                label="Volume",
+                yside="right",
+            )
+
+        # Drawdown-from-peak panel.
+        if self._overlay_states.get("drawdown"):
+            dd = drawdown_from_peak(closes)
+            plt.plot(
+                x_data,
+                dd.tolist(),
+                color=error_color,
+                label="Drawdown",
+                yside="right",
+            )
+
+        # Vertical markers on earnings dates inside the visible range.
+        if self._overlay_states.get("earnings"):
+            start = self._data.index.min().date()
+            end = self._data.index.max().date()
+            for value in earnings_dates_in_range(self._data, start, end):
+                timestamp = pd.Timestamp(value).timestamp()
+                plt.vertical_line(timestamp, color=success_color)
 
         self._set_date_ticks()  # Configure x-axis (date) ticks and labels
         self._set_price_ticks()  # Configure y-axis (price) ticks and labels
@@ -176,7 +250,7 @@ class HistoryChart(PlotextPlot):
         elif self._period == "1d":
             # Special handling for 1-day period to show hourly ticks
             hour_ticks = []
-            current_date = start_date.floor("H")  # Start from the beginning of the hour
+            current_date = start_date.floor("h")  # Start from the beginning of the hour
             if current_date < start_date:
                 current_date += pd.Timedelta(
                     hours=1
