@@ -17,6 +17,7 @@ from stockstui.common import (
     TickerInfoComparisonUpdated,
 )
 from stockstui.data_providers import fred_provider, market_provider
+from stockstui.data_providers.base import get_provider_report
 from stockstui.presentation import formatter
 from stockstui.ui.modals import CompareInfoModal, FredSeriesModal
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
@@ -198,6 +199,7 @@ class DebugView(Vertical):
             yield Button("Test Lists (Network)", id="debug-test-lists")
             yield Button("Test Cache (Local Speed)", id="debug-test-cache")
             yield Button("Test FRED (API)", id="debug-test-fred")
+            yield Button("Data Sources", id="debug-provider-report")
 
         with Container(id="debug-output-container"):
             yield Static("[dim]Run a test to see results.[/dim]", id="info-message")
@@ -458,6 +460,38 @@ class DebugView(Vertical):
                     for name, tickers in self.app.config.lists.items()
                 }
                 self._dispatch_test("run_cache_test", self.run_cache_test, lists_to_test)
+            elif button_id == "debug-provider-report":
+                # Local read of the last recorded fetch outcome per capability;
+                # no network call, so buttons are re-enabled immediately.
+                dt.add_columns(
+                    "Capability", "Provider", "Status", "Detail", "Updated", "Falls back to"
+                )
+                status_styles = {
+                    "ok": "green",
+                    "fallback": "yellow",
+                    "error": "red",
+                    "idle": "dim",
+                }
+                for row in get_provider_report():
+                    age = row["age_seconds"]
+                    if age is None:
+                        updated = "—"
+                    elif age >= 90:
+                        updated = f"{age / 60:.0f}m ago"
+                    else:
+                        updated = f"{age:.0f}s ago"
+                    dt.add_row(
+                        row["description"],
+                        row["provider"],
+                        Text(
+                            row["status"],
+                            style=status_styles.get(row["status"], ""),
+                        ),
+                        row["detail"] or "—",
+                        updated,
+                        row["fallback"],
+                    )
+                self._enable_buttons()
 
     def on_key(self, event: Any) -> None:
         """Handle keyboard navigation for debug view."""

@@ -2,13 +2,15 @@
 Options data provider for fetching stock options chains using yfinance.
 """
 
+import datetime
 import logging
 import time
-import yfinance as yf
 from typing import Any
-import datetime
-from stockstui.utils import black_scholes
 
+import yfinance as yf
+
+from stockstui.data_providers.base import record_outcome
+from stockstui.utils import black_scholes
 
 # Cache for options data with TTL
 _options_cache: dict[str, dict[str, Any]] = {}
@@ -81,10 +83,15 @@ def get_available_expirations(
                 "data": expirations,
                 "timestamp": time.time(),
             }
+            record_outcome(
+                "options", ok=True, detail=f"{ticker_upper}: {len(expirations)} expirations"
+            )
             return expirations
+        record_outcome("options", ok=True, detail=f"{ticker_upper}: no options listed")
         return None
     except Exception as e:
         logging.error(f"Error fetching expirations for {ticker_symbol}: {e}")
+        record_outcome("options", ok=False, detail=f"{ticker_upper} expirations: {e}")
         return None
 
 
@@ -210,12 +217,21 @@ def get_options_chain(
 
         # Cache the result
         _options_cache[cache_key] = {"data": result, "timestamp": time.time()}
+        record_outcome(
+            "options",
+            ok=True,
+            detail=f"{ticker_upper} {calc_date or 'nearest'}: chain loaded",
+        )
 
         return result
     except ValueError as e:
         # Specific error for invalid expiration date
         logging.error(f"Invalid expiration date for {ticker_symbol}: {e}")
+        record_outcome(
+            "options", ok=False, detail=f"{ticker_upper} {expiration_date}: invalid expiration"
+        )
         return None
     except Exception as e:
         logging.error(f"Error fetching options chain for {ticker_symbol}: {e}")
+        record_outcome("options", ok=False, detail=f"{ticker_upper} chain: {e}")
         return None

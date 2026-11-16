@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock
+
 from textual.app import App
 from textual.widgets import Button, Static
 
@@ -54,8 +55,8 @@ class TestDebugViewExtended(unittest.IsolatedAsyncioTestCase):
             # Check that the buttons exist
             buttons = view.query(".debug-buttons Button")
             self.assertEqual(
-                len(buttons), 5
-            )  # Compare Ticker Info, Test Tickers, Test Lists, Test Cache, Test FRED
+                len(buttons), 6
+            )  # Compare Ticker Info, Test Tickers, Test Lists, Test Cache, Test FRED, Data Sources
 
             # Check that the output container exists
             container = view.query_one("#debug-output-container")
@@ -323,6 +324,37 @@ class TestDebugViewExtended(unittest.IsolatedAsyncioTestCase):
 
             # The modal should have been pushed
             app.push_screen.assert_called()
+
+    async def test_provider_report_button_renders_capability_rows(self):
+        """Data Sources renders one row per capability without a network call."""
+        from unittest.mock import patch as mock_patch
+
+        from stockstui.data_providers import base as provider_base
+
+        app = DebugViewTestApp()
+
+        async with app.run_test() as pilot:
+            view = app.query_one(DebugView)
+            button = view.query_one("#debug-provider-report", Button)
+            with mock_patch(
+                "stockstui.data_providers.market_provider.yf.Ticker"
+            ) as mock_ticker:
+                from textual.widgets import Button as TextualButton
+
+                event = TextualButton.Pressed(button)
+                await view.on_debug_button_pressed(event)
+                await pilot.pause()
+
+                # The report is a local read: yfinance must not be touched.
+                mock_ticker.assert_not_called()
+
+            dt = view.query_one("#debug-table")
+            self.assertEqual(
+                dt.row_count, len(provider_base.CAPABILITIES)
+            )
+            # Buttons are re-enabled right away since nothing runs in background.
+            buttons = view.query(".debug-buttons Button")
+            self.assertFalse(any(btn.disabled for btn in buttons))
 
     async def test_different_button_scenarios(self):
         """Test different scenarios for each button."""

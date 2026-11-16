@@ -1,12 +1,14 @@
-import yfinance as yf
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
-import time
-import pandas as pd
-from stockstui.utils import merge_price_data
 
+import pandas as pd
+import yfinance as yf
+
+from stockstui.data_providers.base import record_outcome
+from stockstui.utils import merge_price_data
 
 # In-memory cache for storing fetched market data to reduce API calls.
 _price_cache: dict[str, dict[str, Any]] = {}
@@ -319,6 +321,8 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
 
     # Write to module-level caches sequentially (no concurrent access).
     # Preserve the original ticker order for predictability.
+    failed_tickers: list[str] = []
+    fallback_kept: list[str] = []
     for ticker in tickers:
         slow_info, fast_info = raw_results.get(ticker, (None, None))
         try:
@@ -392,9 +396,13 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
                 # If slow_info is a dict but has no currency, it's an invalid ticker.
                 # In either case, we merge or keep existing cached data to avoid N/A corruption on transient failures.
                 description = "Data Unavailable" if slow_info is None else "Invalid Ticker"
+                if slow_info is None:
+                    failed_tickers.append(ticker)
                 existing_entry = _price_cache.get(ticker)
                 if existing_entry and "data" in existing_entry:
                     merged_data = existing_entry["data"].copy()
+                    if slow_info is None:
+                        fallback_kept.append(ticker)
                     if "description" not in merged_data or merged_data["description"] in ("Data Unavailable", "Invalid Ticker"):
                         merged_data["description"] = description
                 else:
@@ -419,6 +427,20 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
                 "data": merged_data,
             }
 
+    if failed_tickers:
+        record_outcome(
+            "quotes",
+            ok=False,
+            detail=(
+                f"{len(failed_tickers)} of {len(tickers)} failed: "
+                + ", ".join(failed_tickers[:5])
+                + ("…" if len(failed_tickers) > 5 else "")
+            ),
+            fallback_used=bool(fallback_kept),
+        )
+    else:
+        record_outcome("quotes", ok=True, detail=f"{len(tickers)} tickers")
+
 
 def _fetch_fast_data(tickers: list[str], prepost: bool = False) -> dict:
     """
@@ -439,6 +461,7 @@ def _fetch_fast_data(tickers: list[str], prepost: bool = False) -> dict:
         return {}
 
     live_prices: dict[str, dict] = {}
+    fast_error: str | None = None
     try:
         # period="1d" with interval="1m" gives today's intraday bars.
         # auto_adjust=False returns raw (unadjusted) prices, consistent with
@@ -457,6 +480,7 @@ def _fetch_fast_data(tickers: list[str], prepost: bool = False) -> dict:
         )
 
         if df is None or df.empty:
+            fast_error = "no data returned for this session"
             return {}
 
         for ticker in tickers:
@@ -516,7 +540,12 @@ def _fetch_fast_data(tickers: list[str], prepost: bool = False) -> dict:
 
     except Exception as e:
         logging.warning(f"Batch fast-data download failed: {e}")
+        fast_error = str(e)
 
+    if fast_error:
+        record_outcome("quotes_live", ok=False, detail=fast_error)
+    elif live_prices:
+        record_outcome("quotes_live", ok=True, detail=f"{len(live_prices)} tickers")
     return live_prices
 
 
@@ -527,6 +556,7 @@ def get_ticker_info(ticker: str) -> dict | None:
         info = yf.Ticker(ticker).info
         if not info or not info.get("currency"):
             _info_cache[ticker] = {}
+            record_outcome("info", ok=False, detail=f"{ticker}: invalid ticker")
             return None
         _info_cache[ticker] = {
             "currency": info.get("currency"),
@@ -537,8 +567,9 @@ def get_ticker_info(ticker: str) -> dict | None:
             "hasPrePostMarketData": info.get("hasPrePostMarketData", False),
         }
         return _info_cache[ticker]
-    except Exception:
+    except Exception as e:
         _info_cache[ticker] = {}
+        record_outcome("info", ok=False, detail=f"{ticker}: {e}")
         return None
 
 
@@ -648,17 +679,20 @@ def get_historical_data(ticker: str, period: str, interval: str = "1d"):
         info = get_ticker_info(ticker)
         if not info:
             df.attrs["error"] = "Invalid Ticker"
+            record_outcome("history", ok=False, detail=f"{ticker}: invalid ticker")
             return df
         data = yf.Ticker(ticker).history(period=period, interval=interval)
         if not data.empty:
             data.attrs["symbol"] = ticker.upper()
             data.attrs["currency"] = info.get("currency")
+            record_outcome("history", ok=True, detail=f"{ticker} {period}/{interval}")
         return data
     except Exception as e:
         # HACK: yfinance sometimes raises errors for valid tickers with no data in range.
         # Log the actual error for debugging, but return an empty dataframe.
         logging.error(f"yfinance error fetching history for {ticker} ({period}): {e}")
         df.attrs["error"] = "Data Error"
+        record_outcome("history", ok=False, detail=f"{ticker} {period}: {e}")
         return df
 
 
@@ -682,15 +716,40 @@ def get_news_data(ticker: str) -> list[dict] | None:
         return []
     normalized_ticker = ticker.upper()
     now = datetime.now(timezone.utc)
+    stale_fallback: list[dict] | None = None
     if normalized_ticker in _news_cache:
         timestamp, cached_data = _news_cache[normalized_ticker]
         if (now - timestamp).total_seconds() < NEWS_CACHE_DURATION_SECONDS:
             return cached_data
+        stale_fallback = cached_data
     info = get_ticker_info(ticker)
     if not info:
+        if stale_fallback is not None:
+            logging.warning(f"Returning stale cached news for {normalized_ticker}.")
+            record_outcome(
+                "news",
+                ok=False,
+                detail=f"{normalized_ticker}: invalid ticker, served stale cache",
+                fallback_used=True,
+            )
+            return stale_fallback
         return None
-    raw_news = yf.Ticker(normalized_ticker).news
+    try:
+        raw_news = yf.Ticker(normalized_ticker).news
+    except Exception as e:
+        logging.warning(f"Failed to fetch news for {normalized_ticker}: {e}")
+        if stale_fallback is not None:
+            record_outcome(
+                "news",
+                ok=False,
+                detail=f"{normalized_ticker}: {e}, served stale cache",
+                fallback_used=True,
+            )
+            return stale_fallback
+        record_outcome("news", ok=False, detail=f"{normalized_ticker}: {e}")
+        return None
     if not raw_news:
+        record_outcome("news", ok=True, detail=f"{normalized_ticker}: no items")
         return []
     processed_news = []
     for item in raw_news:
@@ -721,6 +780,7 @@ def get_news_data(ticker: str) -> list[dict] | None:
             }
         )
     _news_cache[normalized_ticker] = (datetime.now(timezone.utc), processed_news)
+    record_outcome("news", ok=True, detail=f"{normalized_ticker}: {len(processed_news)} items")
     return processed_news
 
 
