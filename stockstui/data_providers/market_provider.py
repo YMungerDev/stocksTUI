@@ -33,10 +33,15 @@ def set_bar_store(db_manager) -> None:
 _price_cache: dict[str, dict[str, Any]] = {}
 _news_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
 _info_cache: dict[str, dict[str, Any]] = {}
+_calendar_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _market_calendars: dict[str, Any] = {}
 
 # Duration for which cached news is considered fresh.
 NEWS_CACHE_DURATION_SECONDS = 300  # 5 minutes
+
+# Ticker calendars (earnings/ex-dividend dates) refresh at most daily, per
+# the events issue's acceptance criteria; they change rarely.
+CALENDAR_CACHE_DURATION_SECONDS = 86400  # 24 hours
 
 # Quote types that should bypass regular market hours checks (e.g., they update 24/7).
 EXEMPT_QUOTE_TYPES = {"FUTURE", "CRYPTOCURRENCY", "CURRENCY"}
@@ -136,7 +141,6 @@ def _calculate_info_expiry(exchange_name: str) -> datetime:
                 return future_opens.iloc[0].to_pydatetime() + timedelta(minutes=5)
     except Exception as e:
         logging.debug(f"Failed to calculate info expiry for {exchange_name}: {e}")
-        pass
     return now + timedelta(hours=1)
 
 
@@ -325,14 +329,28 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
             logging.warning(f"Failed to fetch slow data for {ticker}")
             return ticker, None, None
 
+    def _fetch_calendar_one(ticker: str) -> tuple[str, dict[str, Any] | None]:
+        """Fetch the event calendar for a single ticker inside the thread pool."""
+        try:
+            return ticker, get_ticker_calendar(ticker)
+        except Exception:
+            return ticker, None
+
     # Cap threads to avoid hammering yfinance rate-limits on very large lists.
     max_workers = min(len(tickers), 8)
     raw_results: dict[str, tuple[dict | None, object | None]] = {}
+    calendar_results: dict[str, dict[str, Any] | None] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticker = {executor.submit(_fetch_one, t): t for t in tickers}
+        calendar_futures = {
+            executor.submit(_fetch_calendar_one, t): t for t in tickers
+        }
         for future in as_completed(future_to_ticker):
             ticker, slow_info, fast_info = future.result()
             raw_results[ticker] = (slow_info, fast_info)
+        for future in as_completed(calendar_futures):
+            ticker, calendar = future.result()
+            calendar_results[ticker] = calendar
 
     # PERF: Cache _calculate_info_expiry() per exchange so the Pandas calendar
     # schedule query runs once per exchange per batch instead of once per ticker.
@@ -344,6 +362,7 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
     fallback_kept: list[str] = []
     for ticker in tickers:
         slow_info, fast_info = raw_results.get(ticker, (None, None))
+        calendar_info = calendar_results.get(ticker)
         try:
             if slow_info and slow_info.get("currency"):
                 exchange = slow_info.get("exchange", "NYSE")
@@ -398,11 +417,44 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
                     "eps": si.get("trailingEps") or si.get("forwardEps"),
                     "beta": si.get("beta") or si.get("beta3Year"),
                     "all_time_high": si.get("allTimeHigh"),
+                    # Event dates come from the calendar fetched in the same
+                    # slow batch; None for ETFs/crypto shows as a blank cell.
+                    "next_earnings": (
+                        calendar_info.get("earnings_date")
+                        if calendar_info
+                        else None
+                    ),
+                    "ex_dividend": (
+                        calendar_info.get("ex_dividend_date")
+                        if calendar_info
+                        else None
+                    ),
                 }
 
                 existing_entry = _price_cache.get(ticker)
                 if existing_entry and "data" in existing_entry:
                     merged_data = merge_price_data(existing_entry["data"], new_data)
+                    # Stale event dates must not linger after the calendar
+                    # turns empty (e.g. the event passed). An empty dict means
+                    # a successful fetch with no events, so stale keys are
+                    # cleared; None means the fetch failed, so old values are
+                    # kept until the next successful refresh.
+                    if calendar_info is not None:
+                        for event_key in ("next_earnings", "ex_dividend"):
+                            source_key = (
+                                "earnings_date"
+                                if event_key == "next_earnings"
+                                else "ex_dividend_date"
+                            )
+                            value = (
+                                calendar_info.get(source_key)
+                                if calendar_info
+                                else None
+                            )
+                            if value is not None:
+                                merged_data[event_key] = value
+                            else:
+                                merged_data.pop(event_key, None)
                 else:
                     merged_data = new_data
 
@@ -590,6 +642,46 @@ def get_ticker_info(ticker: str) -> dict | None:
         _info_cache[ticker] = {}
         record_outcome("info", ok=False, detail=f"{ticker}: {e}")
         return None
+
+
+def get_ticker_calendar(ticker: str) -> dict[str, Any] | None:
+    """
+    Returns upcoming event dates (earnings, ex-dividend) for a ticker.
+
+    Cached for 24 hours alongside the slow info data. Returns an empty dict
+    for tickers without events (ETFs, crypto) and None only on fetch errors,
+    letting the slow fetch clear stale event dates while preserving them
+    across transient failures.
+    """
+    normalized_ticker = ticker.upper()
+    now = datetime.now(timezone.utc)
+    cached = _calendar_cache.get(normalized_ticker)
+    if cached and (now - cached[0]).total_seconds() < CALENDAR_CACHE_DURATION_SECONDS:
+        return cached[1]
+    try:
+        calendar = yf.Ticker(normalized_ticker).calendar
+    except Exception as e:  # noqa: BLE001 - blanks beat crashes for missing events
+        logging.warning(f"Failed to fetch calendar for {normalized_ticker}: {e}")
+        record_outcome("info", ok=False, detail=f"{ticker} calendar: {e}")
+        return None
+    if not calendar:
+        # ETFs and crypto have no calendar: cache the empty result for the
+        # full TTL so they do not re-hit the API on every refresh.
+        _calendar_cache[normalized_ticker] = (now, {})
+        return {}
+    processed: dict[str, Any] = {}
+    earnings_dates = calendar.get("Earnings Date") or []
+    if earnings_dates:
+        processed["earnings_date"] = min(earnings_dates)
+    if ex_div := calendar.get("Ex-Dividend Date"):
+        processed["ex_dividend_date"] = ex_div
+    if div := calendar.get("Dividend Date"):
+        processed["dividend_date"] = div
+    _calendar_cache[normalized_ticker] = (now, processed)
+    record_outcome(
+        "info", ok=True, detail=f"{normalized_ticker}: calendar cached"
+    )
+    return processed
 
 
 def get_market_status(calendar_name="NYSE") -> dict:

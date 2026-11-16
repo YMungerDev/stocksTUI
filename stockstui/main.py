@@ -64,6 +64,7 @@ from stockstui.ui.view_registry import (
     SPECIAL_TAB_BY_CATEGORY,
     is_watchlist_category,
 )
+from stockstui.ui.views.calendar_view import CalendarView
 from stockstui.ui.views.config_view import ConfigContainer
 from stockstui.ui.views.config_views.general_config_view import GeneralConfigView
 from stockstui.ui.views.config_views.lists_config_view import ListsConfigView
@@ -723,7 +724,11 @@ class StocksTUI(App):
 
     def action_toggle_tag_filter(self) -> None:
         category = self.get_active_category()
-        if category and not is_watchlist_category(category) and category != "fred":
+        if (
+            category
+            and not is_watchlist_category(category)
+            and category not in ("fred", "calendar")
+        ):
             self.bell()
             return
 
@@ -1351,6 +1356,11 @@ class StocksTUI(App):
             elif category == "fred":
                 try:
                     self.query_one(FredView).action_edit_series()
+                except NoMatches:
+                    pass
+            elif category == "calendar":
+                try:
+                    self.query_one(CalendarView).repopulate()
                 except NoMatches:
                     pass
             elif is_watchlist_category(category):

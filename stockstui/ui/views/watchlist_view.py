@@ -32,6 +32,8 @@ DEFAULT_COLUMN_SETTINGS: list[dict[str, Any]] = [
     {"key": "52-Wk Range", "visible": True},
     {"key": "All Time High", "visible": True},
     {"key": "% Off ATH", "visible": True},
+    {"key": "Next Earnings", "visible": False},
+    {"key": "Ex-Div Date", "visible": False},
 ]
 
 NUMERIC_SORT_COLUMNS: frozenset[str] = frozenset(
@@ -280,8 +282,13 @@ def sort_price_table(
         text_content = extract_cell_text(row_values[col_index])
         if text_content in ("N/A", "Invalid Ticker"):
             return (1, 0)
+        if text_content == "":
+            return (1, 0)
         if sort_column_key in ("Description", "Ticker"):
             return (0, text_content.lower())
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text_content):
+            # ISO dates sort correctly as plain strings; float() would reject them.
+            return (0, text_content)
         cleaned_text = re.sub(r"^[^\d\.\-]+", "", text_content)
         cleaned_text = (
             cleaned_text.replace(",", "").replace("%", "").replace("+", "")

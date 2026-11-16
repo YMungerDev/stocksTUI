@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from textual.widget import Widget
 
+from stockstui.ui.views.calendar_view import CalendarView
 from stockstui.ui.views.debug_view import DebugView
 from stockstui.ui.views.fred_view import FredView
 from stockstui.ui.views.history_view import HistoryView
@@ -32,6 +33,16 @@ class TabViewSpec:
 
 
 SPECIAL_TAB_SPECS: tuple[TabViewSpec, ...] = (
+    TabViewSpec(
+        category="calendar",
+        view_id="calendar-view",
+        view_class=CalendarView,
+        primary_widget_selector="#calendar-table",
+        search_table_selector="#calendar-table",
+        can_be_default_tab=False,
+        clears_refresh_status=True,
+        resets_config_sub_view=True,
+    ),
     TabViewSpec(
         category="history",
         view_id="history-view",

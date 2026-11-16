@@ -1,7 +1,8 @@
-from typing import Union
-from datetime import datetime
+from datetime import date, datetime
+
 from dateutil.tz import gettz
 from rich.text import Text
+
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 
 CURRENCY_SYMBOLS = {
@@ -98,6 +99,8 @@ def format_price_data_for_table(
 
         dividend_yield = item.get("dividend_yield")
         all_time_high = item.get("all_time_high")
+        next_earnings = item.get("next_earnings")
+        ex_dividend = item.get("ex_dividend")
         pct_off_ath = None
         if price is not None and all_time_high is not None and all_time_high != 0:
             pct_off_ath = (price / all_time_high) - 1
@@ -128,6 +131,8 @@ def format_price_data_for_table(
                 "Beta": f"{item.get('beta', 0):.2f}" if item.get("beta") else "N/A",
                 "All Time High": all_time_high,
                 "% Off ATH": pct_off_ath,
+                "Next Earnings": _format_event_date(next_earnings),
+                "Ex-Div Date": _format_event_date(ex_dividend),
                 "_change_direction": change_direction,  # Internal use
                 "_raw_price": price,  # For sorting if needed, though Price is used for display
                 "_raw_change": change,
@@ -314,12 +319,21 @@ def format_info_comparison(
     return rows
 
 
+def _format_event_date(value) -> str:
+    """Formats a date-ish event value as YYYY-MM-DD; blank for missing."""
+    if value is None:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+
 def escape(text: str) -> str:
     """Escapes characters that have special meaning in Rich-flavored Markdown."""
     return text.replace("[", r"\[").replace("]", r"\]").replace("*", r"\*")
 
 
-def format_news_for_display(news: list[dict]) -> tuple[Union[str, Text], list[str]]:
+def format_news_for_display(news: list[dict]) -> tuple[str | Text, list[str]]:
     """
     Formats a list of news items into a Markdown string for display.
     If multiple tickers are present, it indicates the source for each article.

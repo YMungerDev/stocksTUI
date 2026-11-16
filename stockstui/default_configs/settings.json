@@ -5,7 +5,8 @@
     "auto_refresh": false,
     "refresh_interval": 300.0,
     "hidden_tabs": [
-        "fred"
+        "fred",
+        "calendar"
     ],
     "fred_settings": {
         "api_key": "",
@@ -88,6 +89,14 @@
         },
         {
             "key": "% Off ATH",
+            "visible": false
+        },
+        {
+            "key": "Next Earnings",
+            "visible": false
+        },
+        {
+            "key": "Ex-Div Date",
             "visible": false
         }
     ]
