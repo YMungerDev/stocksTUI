@@ -1,5 +1,6 @@
 import logging
 import webbrowser
+import pandas as pd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar
@@ -54,6 +55,11 @@ from stockstui.database.db_manager import DbManager
 from stockstui.log_handler import TextualHandler
 from stockstui.parser import create_arg_parser
 from stockstui.presentation import formatter
+from stockstui.presentation.overlays import (
+    align_series,
+    beta_against,
+    rebase_to_100,
+)
 from stockstui.ui.themes import (
     BASE_THEME_STRUCTURE,
     extract_theme_variables,
@@ -962,6 +968,56 @@ class StocksTUI(App):
             logger.error(
                 f"Worker fetch_historical_data failed for {ticker} over {period} with interval {interval}: {e}"
             )
+
+    @work(exclusive=True, thread=True)
+    def fetch_historical_comparison(
+        self, tickers: list[str], period: str, interval: str = "1d"
+    ) -> None:
+        """
+        Fetches daily bars for several tickers and posts a rebased
+        comparison frame (#7): columns keyed by ticker (ratio entries
+        keyed 'A/B'), aligned on common dates and rebased to 100.
+        """
+        try:
+            series_by_key: dict[str, pd.Series] = {}
+            for ticker in tickers:
+                frame = market_provider.get_historical_data(ticker, period, interval)
+                if frame is None or frame.empty or "Close" not in frame.columns:
+                    continue
+                closes = pd.Series(
+                    frame["Close"].astype(float).to_numpy(), index=frame.index
+                )
+                series_by_key[ticker.upper()] = closes
+
+            # Ratio keys 'A/B' divide A by B on aligned dates.
+            resolved: dict[str, pd.Series] = dict(series_by_key)
+            for key in list(tickers):
+                if "/" in key:
+                    left, _, right = key.partition("/")
+                    left_u, right_u = left.upper().strip(), right.upper().strip()
+                    if left_u in series_by_key and right_u in series_by_key:
+                        aligned = align_series(
+                            {"a": series_by_key[left_u], "b": series_by_key[right_u]}
+                        )
+                        resolved[key.upper()] = aligned["a"] / aligned["b"]
+
+            resolved = {k: v for k, v in resolved.items() if k in {t.upper() for t in tickers}}
+            aligned = align_series(resolved)
+            if aligned.empty:
+                raise ValueError("no overlapping data for the requested tickers")
+            rebased = rebase_to_100(aligned)
+            rebased.attrs["comparison_tickers"] = [
+                t.upper() for t in tickers
+            ]
+            if not get_current_worker().is_cancelled:
+                self.post_message(HistoricalDataUpdated(rebased))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Worker fetch_historical_comparison failed: {e}")
+            df = pd.DataFrame()
+            df.attrs["error"] = "Data Error"
+            df.attrs["symbol"] = ", ".join(tickers)
+            if not get_current_worker().is_cancelled:
+                self.post_message(HistoricalDataUpdated(df))
 
     @work(exclusive=True, thread=True)
     def fetch_options_expirations(self, ticker: str) -> None:

@@ -11,6 +11,7 @@ from textual.widgets import DataTable, Input, RadioButton, Static, Switch
 from textual.widgets.data_table import CellDoesNotExist
 
 from stockstui.presentation import formatter
+from stockstui.presentation.overlays import beta_against, pairwise_correlations
 from stockstui.ui.suggesters import TickerSuggester
 from stockstui.ui.widgets.history_chart import HistoryChart
 from stockstui.ui.widgets.vim_radio_set import VimRadioSet
@@ -221,8 +222,15 @@ class HistoryView(Vertical):
             view_toggle = self.query_one("#history-view-toggle", Switch)
             if view_toggle.value:
                 # Display as a chart
-                chart_widget = HistoryChart(last_data, period=self.app._history_period)
+                is_comparison = last_data.attrs.get("comparison_tickers")
+                chart_widget = HistoryChart(
+                    last_data,
+                    period=self.app._history_period,
+                    comparison=bool(is_comparison),
+                )
                 await display_container.mount(chart_widget)
+                if is_comparison:
+                    await self._mount_correlation_table(last_data)
             else:
                 # Display as a table
                 table = formatter.format_historical_data_as_table(last_data)
@@ -231,12 +239,63 @@ class HistoryView(Vertical):
         except NoMatches:
             pass
 
+    async def _mount_correlation_table(self, data) -> None:
+        """Mounts the pairwise correlation/beta table under a comparison chart."""
+        from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
+
+        try:
+            correlations = pairwise_correlations(data)
+            if correlations.empty:
+                return
+            columns = list(correlations.columns)
+            benchmark = columns[0]
+            betas = {
+                ticker: beta_against(data[ticker], data[benchmark])
+                for ticker in columns
+                if ticker != benchmark
+            }
+            table = NavigableDataTable(id="history-correlation-table", zebra_stripes=True)
+            table.add_columns("Ticker", *[f"ρ vs {c}" for c in columns], "β vs benchmark")
+            for ticker in columns:
+                beta_value = betas.get(ticker)
+                row: list = [
+                    Text(ticker, style="bold"),
+                    Text(f"{beta_value:.2f}" if beta_value is not None else "—"),
+                ]
+                for other in columns:
+                    if other == ticker:
+                        row.append(Text("1.00", style="dim"))
+                        continue
+                    value = correlations.loc[ticker, other]
+                    row.append(Text(f"{value:.2f}"))
+                table.add_row(*row)
+            # The chart container hosts the table beneath the chart.
+            await self.query_one("#history-display-container").mount(table)
+        except Exception as e:  # noqa: BLE001 - stats must never break render
+            logger.error(f"Failed to render correlation table: {e}")
+
     def _request_historical_data(self):
         """
         Initiates the fetching of historical data based on the selected ticker
         and time range. Dispatches a worker to perform the actual data fetch.
         """
         if not self.app.history_ticker:
+            return
+        # Comparison mode: comma-separated tickers (ratio entries pass through).
+        entries = [
+            t.strip().upper()
+            for t in str(self.app.history_ticker).split(",")
+            if t.strip()
+        ]
+        if len(entries) > 1:
+            try:
+                display_container = self.query_one("#history-display-container")
+                display_container.loading = True
+                self.app.fetch_historical_comparison(
+                    entries, self._current_period(), "1d"
+                )
+            except NoMatches:
+                pass
             return
         try:
             radio_set = self.query_one("#history-range-select", VimRadioSet)
@@ -280,6 +339,26 @@ class HistoryView(Vertical):
         except NoMatches:
             pass
 
+    def _current_period(self) -> str:
+        """The period from the pressed range radio button (default 1mo)."""
+        try:
+            radio_set = self.query_one("#history-range-select", VimRadioSet)
+            period_map = {
+                "1D": "1d",
+                "5D": "5d",
+                "1M": "1mo",
+                "6M": "6mo",
+                "YTD": "ytd",
+                "1Y": "1y",
+                "5Y": "5y",
+                "All": "max",
+            }
+            if radio_set.pressed_button:
+                return period_map.get(str(radio_set.pressed_button.label), "1mo")
+        except NoMatches:
+            pass
+        return "1mo"
+
     def _parse_ticker_from_input(self, value: str) -> str:
         """Extracts the ticker symbol from a suggestion string ('TICKER - Desc') or raw input."""
         if " - " in value:
@@ -290,6 +369,15 @@ class HistoryView(Vertical):
     def on_history_ticker_submitted(self, event: Input.Submitted):
         """Handles submission of the ticker input, triggering data fetch."""
         if event.value:
+            raw = event.value.strip()
+            # Multi-ticker and ratio syntax: 'NVDA,AMD' or 'NVDA/SMH'.
+            entries = [part.strip() for part in raw.split(",") if part.strip()]
+            if len(entries) > 1 or (len(entries) == 1 and "/" in entries[0]):
+                self.app.history_ticker = ",".join(
+                    e.upper() for e in entries
+                )
+                self._request_historical_data()
+                return
             self.app.history_ticker = self._parse_ticker_from_input(event.value)
             self._request_historical_data()
 

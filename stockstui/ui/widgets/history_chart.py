@@ -13,7 +13,9 @@ from stockstui.presentation.overlays import (
 class HistoryChart(PlotextPlot):
     """A custom widget to display a historical stock chart using plotext."""
 
-    def __init__(self, data: pd.DataFrame, period: str, *args, **kwargs):
+    def __init__(
+        self, data: pd.DataFrame, period: str, comparison: bool = False, *args, **kwargs
+    ):
         """
         Initializes the HistoryChart widget.
 
@@ -25,6 +27,7 @@ class HistoryChart(PlotextPlot):
         super().__init__(*args, **kwargs)
         self._data = data
         self._period = period
+        self._comparison = comparison
         self._overlay_states = {
             "sma50": False,
             "sma200": False,
@@ -74,7 +77,33 @@ class HistoryChart(PlotextPlot):
         error_color = theme_vars.get("error", "red")
         warning_color = theme_vars.get("warning", "yellow")
 
-        # Plot the price history first so overlays draw on top.
+        if self._comparison:
+            # Comparison mode (#7): one labeled line per column, rebased
+            # to 100. Overlays do not apply to comparison frames.
+            comparison_colors = [
+                price_color,
+                accent_color,
+                warning_color,
+                success_color,
+                error_color,
+                "cyan",
+                "magenta",
+            ]
+            for pos, column in enumerate(self._data.columns):
+                plt.plot(
+                    x_data,
+                    self._data[column].astype(float).tolist(),
+                    color=comparison_colors[pos % len(comparison_colors)],
+                    label=str(column),
+                )
+            plt.title("Relative Performance (rebased to 100)")
+            plt.ylabel("Rebased value")
+            self._set_date_ticks()
+            plt.grid(True, True)
+            return
+
+        # Single-ticker mode: plot the price history first so overlays
+        # draw on top.
         plt.plot(x_data, y_data, color=price_color, label="Close")
 
         # Moving averages: drawn only when a full window of closes exists,

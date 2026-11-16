@@ -65,3 +65,48 @@ def earnings_dates_in_range(
         if value is not None and start <= value <= end:
             out.append(value)
     return out
+
+
+def align_series(series_by_ticker: dict[str, pd.Series]) -> pd.DataFrame:
+    """
+    Aligns named close series on their common dates (inner join) and drops
+    rows with missing values, per #7's acceptance criteria.
+    """
+    if not series_by_ticker:
+        return pd.DataFrame()
+    frame = pd.DataFrame(series_by_ticker)
+    return frame.dropna()
+
+
+def rebase_to_100(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rebases every column to start at 100 so relative performance is
+    directly comparable across tickers with different price scales.
+    """
+    if frame.empty:
+        return frame
+    first = frame.iloc[0]
+    return frame / first * 100
+
+
+def pairwise_correlations(frame: pd.DataFrame) -> pd.DataFrame:
+    """Daily-return correlation matrix for the aligned frame."""
+    if frame.empty:
+        return pd.DataFrame()
+    returns = frame.pct_change().dropna()
+    return returns.corr()
+
+
+def beta_against(series: pd.Series, benchmark: pd.Series) -> float | None:
+    """
+    Beta of `series` versus `benchmark` over their common dates:
+    cov(r_s, r_b) / var(r_b).
+    """
+    aligned = pd.DataFrame({"s": series, "b": benchmark}).dropna()
+    if len(aligned) < 3:
+        return None
+    returns = aligned.pct_change().dropna()
+    benchmark_var = returns["b"].var()
+    if not benchmark_var or benchmark_var == 0:
+        return None
+    return float(returns["s"].cov(returns["b"]) / benchmark_var)
