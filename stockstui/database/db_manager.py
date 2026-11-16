@@ -17,7 +17,8 @@ CACHE_LOAD_DURATION_SECONDS = 86400  # 24 hours
 # This keeps the database file size manageable over time.
 CACHE_PRUNE_EXPIRY_SECONDS = 604800  # 7 days
 
-# Fundamentals statements refresh at most daily; they change with filings.
+# Research/statement payloads refresh at most daily; they change with
+# filings and analyst updates.
 _FUNDAMENTALS_TTL_SECONDS = 86400  # 24 hours
 
 # Ticker info (exchange, name) changes very rarely. Cache it for a long time.
