@@ -1,5 +1,21 @@
 # Change Log
 
+## [Unreleased]
+
+### Added
+- `feat(providers)`: Introduce a market data provider interface and capability registry (#14), so yfinance becomes a replaceable implementation per capability (quotes, info, history, news, options) and future providers (EDGAR, FRED, local bar store) can plug in
+- `feat(providers)`: Record the outcome of every provider fetch (ok/fallback/error with detail) and surface which provider served the data in a new Debug tab "Data Sources" panel
+- `feat(db)`: Persist daily price bars in SQLite (`daily_bars` table with raw OHLCV and adjusted closes, never pruned) (#1)
+- `feat(history)`: Serve daily-interval history offline from the local bar store, falling back to the network when the store has no bars
+- `feat(history)`: Incrementally top up stored bars with one batched download per run, starting only a few days before each ticker's newest stored bar
+
+### Fixed
+- `fix(market-provider)`: Return stale cached news when yfinance fails or the ticker turns invalid, instead of surfacing a fetch error when cached news exists (#14)
+- `fix(history)`: Re-download a ticker's full stored range when a split or dividend changes adjustment factors (detected via adjusted-close divergence or new Dividends/Stock Splits rows), keeping stored ratios consistent across the whole history (#1)
+
+### Changed
+- `refactor(market-provider)`: Fetch history as raw bars plus `Adj Close` and apply adjustment ratios at display time, so stored and freshly fetched history render identically (#1)
+
 ## [0.1.0-b14] 2026-07-08
 
 ### Added
