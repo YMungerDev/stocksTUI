@@ -33,42 +33,87 @@ class TestTickerToCik(unittest.TestCase):
     def tearDown(self):
         edgar_provider.reset_caches()
 
-    def test_user_agent_header_is_sent(self):
+    def test_user_agent_header_carries_the_contact(self):
         """Every request must carry an identifying User-Agent (SEC policy)."""
-        captured: dict = {}
-
-        class FakeResponse:
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return {
-                    str(i): {"ticker": "AAPL", "cik_str": 320193, "title": "Apple"}
-                    for i in range(3)
-                }
-
-        def fake_get(url, timeout=None):
-            captured["headers"] = edgar_provider._get_session().headers
-            return FakeResponse()
-
-        with patch.object(edgar_provider._get_session(), "get", side_effect=fake_get):
-            edgar_provider.get_cik_for_ticker("AAPL")
-
-        ua = captured["headers"].get("User-Agent", "")
+        edgar_provider.set_contact("Jane Doe jane@example.org")
+        try:
+            ua = edgar_provider._get_session().headers.get("User-Agent", "")
+        finally:
+            edgar_provider.set_contact("")
         self.assertIn("stocksTUI", ua)
-        self.assertIn("contact", ua)
+        self.assertIn("jane@example.org", ua)
+
+    def test_contact_without_an_email_is_rejected(self):
+        edgar_provider.set_contact("project maintainer")
+        self.assertFalse(edgar_provider.has_contact())
+        with self.assertRaises(edgar_provider.EdgarContactMissing):
+            edgar_provider._get_session()
 
     @patch.object(edgar_provider, "requests")
-    def test_network_failure_returns_none(self, mock_requests):
+    def test_network_failure_raises_instead_of_reporting_no_cik(self, mock_requests):
         import requests as real_requests
 
         mock_requests.RequestException = real_requests.RequestException
         mock_session = MagicMock()
         mock_session.get.side_effect = real_requests.ConnectionError("down")
+        with patch.object(edgar_provider, "_get_session", return_value=mock_session):
+            with self.assertRaises(edgar_provider.EdgarError):
+                edgar_provider.get_cik_for_ticker("AAPL")
+
+
+class TestContactAndErrors(unittest.TestCase):
+    def setUp(self):
+        edgar_provider.reset_caches()
+
+    def tearDown(self):
+        edgar_provider.set_contact("")
+        edgar_provider.reset_caches()
+
+    def test_no_contact_raises_without_any_request(self):
+        edgar_provider.set_contact("")
+        with patch.object(edgar_provider.requests, "Session") as session_cls:
+            with self.assertRaises(edgar_provider.EdgarContactMissing):
+                edgar_provider.fetch_filings("AAPL")
+        session_cls.assert_not_called()
+
+    def test_403_names_the_contact_setting(self):
+        response = MagicMock(status_code=403)
+        mock_session = MagicMock()
+        mock_session.get.return_value = response
+        with patch.object(edgar_provider, "_get_session", return_value=mock_session):
+            with self.assertRaises(edgar_provider.EdgarError) as ctx:
+                edgar_provider.fetch_filings("AAPL")
+        self.assertIn("contact", str(ctx.exception))
+
+    def test_outage_is_not_cached_as_an_uncovered_ticker(self):
+        import requests as real_requests
+
+        ok_mapping = MagicMock(status_code=200)
+        ok_mapping.json.return_value = {"0": {"ticker": "AAPL", "cik_str": 320193}}
+        ok_submissions = MagicMock(status_code=200)
+        ok_submissions.json.return_value = _submissions_payload(["10-K"])
+        mock_session = MagicMock()
+        mock_session.get.side_effect = [
+            real_requests.ConnectionError("down"),
+            ok_mapping,
+            ok_submissions,
+        ]
+        with patch.object(edgar_provider, "_get_session", return_value=mock_session):
+            with self.assertRaises(edgar_provider.EdgarError):
+                edgar_provider.fetch_filings("AAPL")
+            filings = edgar_provider.fetch_filings("AAPL")
+        self.assertEqual([f["form"] for f in filings], ["10-K"])
+
+    def test_stale_list_is_served_when_a_refresh_fails(self):
+        import requests as real_requests
+
+        edgar_provider._submissions_cache["AAPL"] = (0.0, [{"form": "10-K"}])
+        mock_session = MagicMock()
+        mock_session.get.side_effect = real_requests.ConnectionError("down")
         with patch.object(
-            edgar_provider, "_session", mock_session
+            edgar_provider, "_load_ticker_to_cik", return_value={"AAPL": 320193}
         ), patch.object(edgar_provider, "_get_session", return_value=mock_session):
-            self.assertIsNone(edgar_provider.get_cik_for_ticker("AAPL"))
+            self.assertEqual(edgar_provider.fetch_filings("AAPL"), [{"form": "10-K"}])
 
 
 class TestFetchFilings(unittest.TestCase):
@@ -350,3 +395,66 @@ class TestFilingsView(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFilingsViewErrors(unittest.IsolatedAsyncioTestCase):
+    async def test_error_is_shown_instead_of_the_empty_state(self):
+        class FilingsHostApp(App):
+            config = MagicMock()
+            config.lists = {"stocks": [{"ticker": "AAPL", "alias": "Apple"}]}
+            filings_ticker = None
+            fetch_filings = MagicMock()
+
+            def compose(self):
+                yield FilingsView()
+
+        app = FilingsHostApp()
+        async with app.run_test():
+            view = app.query_one(FilingsView)
+            view.update_filings(None, edgar_provider.CONTACT_MISSING_MESSAGE)
+            table = view.query_one("#filings-table", DataTable)
+            text = str(table.get_row_at(0)[0])
+            self.assertIn("SEC Contact", text)
+            self.assertNotIn("Non-US", text)
+
+
+class TestContactFromConfig(unittest.TestCase):
+    def tearDown(self):
+        edgar_provider.set_contact("")
+
+    def _make_app(self, tmpdir, sec_contact, env):
+        import json
+        import os
+        from pathlib import Path
+
+        from stockstui import main as main_module
+
+        config_dir = Path(tmpdir) / "config"
+        config_dir.mkdir(parents=True)
+        (config_dir / "settings.json").write_text(json.dumps({"sec_contact": sec_contact}))
+        with patch("stockstui.config_manager.dirs") as mock_dirs, patch.dict(
+            os.environ, env, clear=False
+        ):
+            os.environ.pop("STOCKSTUI_SEC_CONTACT", None) if not env else None
+            mock_dirs.user_config_dir = str(config_dir)
+            mock_dirs.user_cache_dir = str(Path(tmpdir) / "cache")
+            main_module.StocksTUI(cli_overrides={})
+        return main_module.edgar_provider
+
+    def test_setting_is_applied_at_startup(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = self._make_app(tmp, "Ann Lee ann@example.org", {})
+        self.assertIn("ann@example.org", provider._user_agent())
+
+    def test_environment_variable_wins(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = self._make_app(
+                tmp,
+                "Ann Lee ann@example.org",
+                {"STOCKSTUI_SEC_CONTACT": "Bo Kim bo@example.org"},
+            )
+        self.assertIn("bo@example.org", provider._user_agent())

@@ -4,6 +4,7 @@
     "enable_pre_post_market": false,
     "auto_refresh": false,
     "refresh_interval": 300.0,
+    "sec_contact": "",
     "hidden_tabs": [
         "fred",
         "calendar"

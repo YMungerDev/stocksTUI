@@ -33,6 +33,7 @@
 - `fix(alerts)`: 52-week rules accept an empty threshold, a blank rule type is rejected, and the table redraws only when alerts changed
 - `fix(cli)`: `--filter` with no matches skips the empty table but still renders FRED; json/csv keep their exact column set
 - `fix(cli)`: The "Fetching data..." spinner no longer writes cursor codes and frames into `--format json/csv` output on a terminal
+- `fix(edgar)`: Send the SEC contact email the SEC requires (new `sec_contact` setting under Configs > General, or `STOCKSTUI_SEC_CONTACT`); without one the Filings tab silently showed no filings because every request was rejected with 403. Missing contact, 403 and outages now show as an error in the tab, and an outage is no longer cached as "ticker not covered by EDGAR"
 - `fix(market-provider)`: Serialise `schedule()`/`holidays()` calls on shared market calendars, which corrupt under concurrent use ("Length of values does not match length of index")
 - `fix(market-provider)`: Skip the event-calendar request for ETFs, indices and crypto; Yahoo's 404 made yfinance reset its crumb and fail concurrent requests with 401
 

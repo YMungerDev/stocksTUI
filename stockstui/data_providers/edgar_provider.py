@@ -10,7 +10,7 @@ unknown or non-US tickers return an empty list rather than an error.
 """
 
 import logging
-import platform
+import re
 import time
 from typing import Any
 
@@ -23,10 +23,13 @@ EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FILING_INDEX_URL = "https://www.sec.gov/Archives/edgar/data/{cik:010d}/{accession}/{document}"
 
 # EDGAR fair-use: requests must carry a descriptive UA declaring the
-# software and an administrative contact, and stay well below 10 req/s.
+# software and an administrative contact email, and stay well below 10 req/s.
+# The SEC answers 403 ("Undeclared Automated Tool") to a UA without an email,
+# so no request is sent until a contact is configured (settings.json
+# "sec_contact" or the STOCKSTUI_SEC_CONTACT environment variable).
 # A shared session plus TTL caches keep this to a handful of calls per
 # ticker per hour in normal use.
-_USER_AGENT = f"stocksTUI/{platform.python_version()} (terminal TUI; contact: project maintainer)"
+_contact: str = ""
 
 _SUBMISSIONS_CACHE_TTL_SECONDS = 3600  # 1 hour; filings update slowly
 _TICKERS_CACHE_TTL_SECONDS = 86400  # 24 hours; the mapping rarely changes
@@ -57,21 +60,63 @@ DEFAULT_VISIBLE_FORMS: frozenset[str] = frozenset(
 )
 
 
+class EdgarError(Exception):
+    """An EDGAR request could not be made or failed; the message is user-facing."""
+
+
+class EdgarContactMissing(EdgarError):
+    """No SEC contact email is configured, so no request is sent."""
+
+
+CONTACT_MISSING_MESSAGE = (
+    "The SEC requires a contact email in every request. Set it under"
+    " Configs > General > SEC Contact (or STOCKSTUI_SEC_CONTACT)."
+)
+
+
+def _user_agent() -> str:
+    return f"stocksTUI terminal app ({_contact})"
+
+
 def _get_session() -> requests.Session:
     global _session
+    if not _contact:
+        raise EdgarContactMissing(CONTACT_MISSING_MESSAGE)
     if _session is None:
         _session = requests.Session()
-        _session.headers.update({"User-Agent": _USER_AGENT})
+        _session.headers.update({"User-Agent": _user_agent()})
     return _session
 
 
-def set_user_agent(contact: str) -> None:
-    """Sets the SEC contact string used in the User-Agent header."""
-    global _USER_AGENT
-    if contact:
-        _USER_AGENT = f"stocksTUI terminal app ({contact})"
-        if _session is not None:
-            _session.headers.update({"User-Agent": _USER_AGENT})
+def is_valid_contact(contact: str) -> bool:
+    """True when the string contains something shaped like an email address."""
+    return bool(re.search(r"[^@\s]+@[^@\s]+\.[^@\s]+", contact or ""))
+
+
+def set_contact(contact: str) -> None:
+    """Sets the SEC contact (name and email) used in the User-Agent header."""
+    global _contact
+    contact = (contact or "").strip()
+    _contact = contact if is_valid_contact(contact) else ""
+    if _session is not None:
+        _session.headers.update({"User-Agent": _user_agent()})
+
+
+def has_contact() -> bool:
+    return bool(_contact)
+
+
+# Backwards-compatible name.
+set_user_agent = set_contact
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    if response.status_code == 403:
+        raise EdgarError(
+            "SEC rejected the request (403). Check that the SEC contact"
+            " setting holds a real email address."
+        )
+    response.raise_for_status()
 
 
 def reset_caches() -> None:
@@ -89,7 +134,7 @@ def _load_ticker_to_cik() -> dict[str, int]:
     if cached and now - cached[0] < _TICKERS_CACHE_TTL_SECONDS:
         return cached[1]
     response = _get_session().get(EDGAR_TICKERS_URL, timeout=15)
-    response.raise_for_status()
+    _raise_for_status(response)
     mapping: dict[str, int] = {}
     for entry in response.json().values():
         mapping[entry["ticker"].upper()] = int(entry["cik_str"])
@@ -98,13 +143,19 @@ def _load_ticker_to_cik() -> dict[str, int]:
 
 
 def get_cik_for_ticker(ticker: str) -> int | None:
-    """Resolves a ticker to its SEC CIK, or None for non-SEC tickers."""
+    """
+    Resolves a ticker to its SEC CIK, or None for non-SEC tickers.
+
+    Raises EdgarError when the mapping cannot be loaded, so an outage is not
+    mistaken for (and cached as) a ticker EDGAR does not cover.
+    """
     try:
         return _load_ticker_to_cik().get(ticker.upper())
-    except requests.RequestException as e:
+    except EdgarError:
+        raise
+    except (requests.RequestException, KeyError, ValueError) as e:
         logging.warning(f"Failed to load EDGAR ticker mapping: {e}")
-        record_outcome("filings", ok=False, detail=f"ticker map failed: {e}")
-        return None
+        raise EdgarError(f"Could not reach SEC EDGAR: {e}") from e
 
 
 def fetch_filings(ticker: str, force_refresh: bool = False) -> list[dict[str, Any]]:
@@ -112,7 +163,9 @@ def fetch_filings(ticker: str, force_refresh: bool = False) -> list[dict[str, An
     Returns recent filings for a ticker, newest first, capped at 100.
 
     Each row has form, filing_date, report_date, description, and url (the
-    primary document on sec.gov). Non-US tickers or EDGAR outages yield [].
+    primary document on sec.gov). Non-SEC tickers yield []. A missing
+    contact or an EDGAR failure with nothing cached raises EdgarError; with a
+    cached list, the stale list is served instead.
     """
     normalized = ticker.upper()
     now = time.time()
@@ -120,25 +173,27 @@ def fetch_filings(ticker: str, force_refresh: bool = False) -> list[dict[str, An
     if cached and not force_refresh and now - cached[0] < _SUBMISSIONS_CACHE_TTL_SECONDS:
         return cached[1]
 
-    cik = get_cik_for_ticker(normalized)
-    if cik is None:
-        # Non-US / non-SEC ticker: an empty state, not an error (per #10).
-        _submissions_cache[normalized] = (now, [])
-        return []
-
     try:
+        cik = get_cik_for_ticker(normalized)
+        if cik is None:
+            # Non-US / non-SEC ticker: an empty state, not an error (per #10).
+            _submissions_cache[normalized] = (now, [])
+            return []
         response = _get_session().get(EDGAR_SUBMISSIONS_URL.format(cik=cik), timeout=15)
-        response.raise_for_status()
+        _raise_for_status(response)
         recent = response.json()["filings"]["recent"]
-    except (requests.RequestException, KeyError, ValueError) as e:
+    except (EdgarError, requests.RequestException, KeyError, ValueError) as e:
         logging.warning(f"Failed to fetch EDGAR submissions for {normalized}: {e}")
         record_outcome(
-            "filings", ok=False, detail=f"{normalized}: {e}", fallback_used=bool(cached)
+            "filings", ok=False, provider="edgar", detail=f"{normalized}: {e}",
+            fallback_used=bool(cached),
         )
         # Serve stale cache on failure rather than losing the list.
         if cached:
             return cached[1]
-        return []
+        if isinstance(e, EdgarError):
+            raise
+        raise EdgarError(f"Could not fetch filings from SEC EDGAR: {e}") from e
 
     filings: list[dict[str, Any]] = []
     for pos in range(len(recent.get("form", []))):
@@ -168,7 +223,7 @@ def fetch_filings(ticker: str, force_refresh: bool = False) -> list[dict[str, An
         if len(filings) >= 100:
             break
     _submissions_cache[normalized] = (now, filings)
-    record_outcome("filings", ok=True, detail=f"{normalized}: {len(filings)} filings")
+    record_outcome("filings", ok=True, provider="edgar", detail=f"{normalized}: {len(filings)} filings")
     return filings
 
 

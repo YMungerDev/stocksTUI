@@ -7,6 +7,7 @@ from textual.validation import Number
 from textual.widgets import Button, Input, Label, ListItem, ListView, Select, Switch
 
 from stockstui.common import NotEmpty
+from stockstui.data_providers import edgar_provider
 from stockstui.ui.view_registry import ORDERED_TOGGLEABLE_SPECIAL_CATEGORIES
 
 
@@ -23,6 +24,9 @@ class GeneralConfigView(Vertical):
         auto_refresh = self.app.config.get_setting("auto_refresh", False)
         enable_pre_post = self.app.config.get_setting("enable_pre_post_market", False)
         suppress_logs = self.app.config.get_setting("suppress_tui_logs", False)
+        sec_contact = self.app.config.get_setting("sec_contact", "")
+        if not isinstance(sec_contact, str):
+            sec_contact = ""
 
         with Horizontal(id="top-config-container"):
             # Left side for general application settings
@@ -79,6 +83,14 @@ class GeneralConfigView(Vertical):
                         id="refresh-interval-input", validators=[NotEmpty(), Number()]
                     )
                     yield Button("Update", id="update-refresh-interval")
+                with Horizontal(classes="config-option-horizontal"):
+                    yield Label("SEC Contact\n(name + email):", classes="config-label")
+                    yield Input(
+                        value=sec_contact,
+                        placeholder="Your Name you@example.com",
+                        id="sec-contact-input",
+                    )
+                    yield Button("Update", id="update-sec-contact")
             # Right side for managing which tabs are visible
             with Vertical(id="visibility-settings-container"):
                 yield Label("Visible Tabs", classes="config-header")
@@ -150,6 +162,21 @@ class GeneralConfigView(Vertical):
                 self.app.notify(error_message, severity="error", timeout=5)
             else:
                 self.app.notify("Invalid interval value.", severity="error")
+
+    @on(Button.Pressed, "#update-sec-contact")
+    @on(Input.Submitted, "#sec-contact-input")
+    def on_update_sec_contact(self):
+        """Saves the contact SEC EDGAR requires in every request's User-Agent."""
+        value = self.query_one("#sec-contact-input", Input).value.strip()
+        if value and not edgar_provider.is_valid_contact(value):
+            self.app.notify(
+                "The SEC contact must include an email address.", severity="error"
+            )
+            return
+        self.app.config.settings["sec_contact"] = value
+        self.app.config.save_settings()
+        edgar_provider.set_contact(value)
+        self.app.notify("SEC contact updated." if value else "SEC contact cleared.")
 
     @on(Switch.Changed, "#enable-pre-post-market-switch")
     def on_enable_pre_post_market_switch_changed(self, event: Switch.Changed):

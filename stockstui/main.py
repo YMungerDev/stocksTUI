@@ -1,4 +1,5 @@
 import logging
+import os
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -201,6 +202,10 @@ class StocksTUI(App):
         self.last_key: events.Key | None = None
 
         self.config = ConfigManager(Path(__file__).resolve().parent)
+        edgar_provider.set_contact(
+            os.environ.get("STOCKSTUI_SEC_CONTACT")
+            or self.config.get_setting("sec_contact", "")
+        )
         self.price_refresh_timer: Timer | None = None
         self.market_status_timer: Timer | None = None
         self._price_comparison_data: dict[str, Any] = {}
@@ -1001,6 +1006,10 @@ class StocksTUI(App):
             filings = edgar_provider.fetch_filings(ticker)
             if not get_current_worker().is_cancelled:
                 self.post_message(FilingsDataUpdated(ticker, filings))
+        except edgar_provider.EdgarError as e:
+            logger.warning(f"EDGAR unavailable for {ticker}: {e}")
+            if not get_current_worker().is_cancelled:
+                self.post_message(FilingsDataUpdated(ticker, None, error=str(e)))
         except Exception as e:  # noqa: BLE001
             logger.error(f"Worker fetch_filings failed for {ticker}: {e}")
             if not get_current_worker().is_cancelled:
@@ -1344,7 +1353,7 @@ class StocksTUI(App):
         if self.get_active_category() != "filings" or self.filings_ticker != message.ticker:
             return
         try:
-            self.query_one(FilingsView).update_filings(message.data)
+            self.query_one(FilingsView).update_filings(message.data, message.error)
         except NoMatches:
             pass
 

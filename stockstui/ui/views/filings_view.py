@@ -105,9 +105,12 @@ class FilingsView(Vertical):
         table.loading = True
         self.app.fetch_filings(self.app.filings_ticker)
 
-    def update_filings(self, filings: list[dict[str, Any]] | None) -> None:
-        """Receives fetched filings and renders the table."""
+    def update_filings(
+        self, filings: list[dict[str, Any]] | None, error: str | None = None
+    ) -> None:
+        """Receives fetched filings (or why they could not be fetched) and renders."""
         self._filings = filings or []
+        self._error = error
         self._render_table()
 
     def _render_table(self) -> None:
@@ -118,6 +121,10 @@ class FilingsView(Vertical):
             visible = edgar_provider.filter_filings_by_form(
                 self._filings, self._category
             )
+            error = getattr(self, "_error", None)
+            if error and not visible:
+                table.add_row(Text(error, style="red"))
+                return
             if not visible:
                 table.add_row(
                     "[dim]No SEC filings found for this ticker."
