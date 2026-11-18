@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -154,7 +155,15 @@ def _run_cli_output_inner(args, config, bar_store, console, header_style) -> Non
 
     had_ticker_output = False
     if ordered_tickers:
-        with console.status("[bold green]Fetching data...[/]"):
+        output_format = getattr(args, "format", "table") or "table"
+        # The spinner writes cursor codes and frames to stdout on a terminal,
+        # which would corrupt machine-readable output, so json/csv skip it.
+        status = (
+            contextlib.nullcontext()
+            if output_format in ("json", "csv")
+            else console.status("[bold green]Fetching data...[/]")
+        )
+        with status:
             try:
                 enable_pre_post = config.get_setting("enable_pre_post_market", False)
                 data = market_provider.get_market_price_data(
@@ -177,7 +186,6 @@ def _run_cli_output_inner(args, config, bar_store, console, header_style) -> Non
                         ]
                 # Map data by symbol for easier lookup
                 data_map = {item["symbol"]: item for item in data if "symbol" in item}
-                output_format = getattr(args, "format", "table") or "table"
                 if output_format in ("json", "csv"):
                     quotes = [data_map[t] for t in ordered_tickers if t in data_map]
                     _attach_cli_metrics(quotes, bar_store)
