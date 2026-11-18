@@ -20,10 +20,11 @@ from stockstui.presentation import option_analytics as analytics
 from stockstui.presentation.formatter import get_currency_symbol
 from stockstui.ui.position_modal import PositionModal
 from stockstui.ui.suggesters import TickerSuggester
+from stockstui.ui.ticker_focus import TickerHeader, TickerViewMixin
 from stockstui.ui.widgets.oi_chart import OIChart
 
 
-class OptionsView(Vertical):
+class OptionsView(TickerViewMixin, Vertical):
     """A view for displaying stock options chains, allowing selection of tickers and expiration dates."""
 
     BINDINGS = [
@@ -32,6 +33,9 @@ class OptionsView(Vertical):
         Binding("[", "prev_expiration", "Prev Exp", show=True),
         Binding("]", "next_expiration", "Next Exp", show=True),
     ]
+
+    ticker_attr = "options_ticker"
+    ticker_input_id = "options-ticker-input"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -61,6 +65,7 @@ class OptionsView(Vertical):
         )  # Deduplicate by ticker
         suggester = TickerSuggester(unique_suggester_data, case_sensitive=False)
 
+        yield TickerHeader()
         # Horizontal container for ticker input and expiration selector
         with Horizontal(classes="options_controls"):
             yield Input(
@@ -91,6 +96,7 @@ class OptionsView(Vertical):
         Triggers initial data rendering if ticker is already set.
         """
         # Trigger expiration fetch if a ticker is already set
+        self._mark_shown()
         if self.app.options_ticker:
             self.call_after_refresh(self._request_expirations)
 
@@ -554,6 +560,7 @@ class OptionsView(Vertical):
         """Requests available expiration dates for the current ticker."""
         if not self.app.options_ticker:
             return
+        self._mark_shown()
 
         # Disable expiration selector while loading
         try:
@@ -589,8 +596,10 @@ class OptionsView(Vertical):
     def on_options_ticker_submitted(self, event: Input.Submitted):
         """Handles submission of the ticker input, triggering expiration fetch."""
         if event.value:
-            self.app.options_ticker = self._parse_ticker_from_input(event.value)
-            self._request_expirations()
+            self._submit_ticker(self._parse_ticker_from_input(event.value))
+
+    def _load_ticker(self) -> None:
+        self._request_expirations()
 
     @on(Select.Changed, "#options-expiration-select")
     def on_expiration_changed(self, event: Select.Changed):

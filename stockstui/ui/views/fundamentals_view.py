@@ -14,6 +14,7 @@ from stockstui.data_providers import fundamentals_provider
 from stockstui.presentation import quality as quality_metrics
 from stockstui.presentation import valuation as valuation_metrics
 from stockstui.ui.suggesters import TickerSuggester
+from stockstui.ui.ticker_focus import TickerHeader, TickerViewMixin
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 
 logger = logging.getLogger(__name__)
@@ -270,12 +271,15 @@ def source_line(statements: dict[str, Any]) -> Text:
     return text
 
 
-class FundamentalsView(Vertical):
+class FundamentalsView(TickerViewMixin, Vertical):
     """Financial statements, derived ratios, valuation history and quality scores."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("o", "open_source_filing", "Open Filing", show=True),
     ]
+
+    ticker_attr = "fundamentals_ticker"
+    ticker_input_id = "fundamentals-ticker-input"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -293,6 +297,7 @@ class FundamentalsView(Vertical):
         unique_suggester_data = list({t[0]: t for t in suggester_data}.values())
         suggester = TickerSuggester(unique_suggester_data, case_sensitive=False)
 
+        yield TickerHeader()
         with Horizontal(classes="news-controls"):
             yield Input(
                 placeholder="Enter a ticker...",
@@ -334,6 +339,7 @@ class FundamentalsView(Vertical):
         quality_table.add_columns("Metric", "Latest FY", "Prior FY", "Reading")
         research_table = self.query_one("#research-table", NavigableDataTable)
         research_table.add_columns("Block", "Detail")
+        self._mark_shown()
         if self.app.fundamentals_ticker:
             self.call_after_refresh(self._request_statements)
 
@@ -342,7 +348,9 @@ class FundamentalsView(Vertical):
         ticker = event.value.strip().split(" - ")[0].strip().upper()
         if not ticker:
             return
-        self.app.fundamentals_ticker = ticker
+        self._submit_ticker(ticker)
+
+    def _load_ticker(self) -> None:
         self._request_statements()
 
     @on(Select.Changed, "#fundamentals-period-select")
@@ -365,6 +373,7 @@ class FundamentalsView(Vertical):
     def _request_statements(self) -> None:
         if not self.app.fundamentals_ticker:
             return
+        self._mark_shown()
         table = self.query_one("#fundamentals-table", NavigableDataTable)
         table.loading = True
         self.query_one("#valuation-table", NavigableDataTable).loading = True

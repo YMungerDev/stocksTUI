@@ -108,7 +108,12 @@ OPTIONS
 KEYBINDINGS
 
     Global Commands
-      ?             Toggle the built-in, context-aware help screen.
+      ?             Help for the current tab: what it shows and its keys.
+                    The footer lists only the keys that work on the current tab.
+      :             Go to ticker: sets the shared ticker (see below) and opens
+                    a ticker view if you are not on one.
+      < / Alt+Left  Previous ticker viewed (on ticker views).
+      > / Alt+Right Next ticker viewed (on ticker views).
       q / Z         Quit the application.
       r             Refresh data for the currently visible tab.
       R (Shift+R)   Force a refresh for all symbols across all watchlists.
@@ -143,6 +148,14 @@ KEYBINDINGS
         o, H, L, v  Sort by Open, High, Low, or Volume (History View only).
         u           Restore original view (clears sorting and search filters).
 
+    Shared Ticker
+      History, News, Filings, Fundamentals and Options all follow one shared
+      ticker, shown in a header line (e.g. "AAPL · Apple · $353.78 +0.4%").
+      Enter on a watchlist row, ':', the open-mode keys, or typing a single
+      symbol into any of those views changes it for all of them. A History
+      comparison (NVDA,AMD or NVDA/SMH) or a multi-ticker News list stays in
+      that view until the shared ticker changes again.
+
     News View
       Tab           Cycle focus to the next news article link.
       Shift+Tab     Cycle focus to the previous link.
@@ -155,6 +168,7 @@ KEYBINDINGS
       Ctrl+Y        Toggle earnings-date markers.
 
     Watchlist View
+      Enter         Make the highlighted row the shared ticker.
       a             Manage price alerts for the selected ticker.
       Enter         Open the currently highlighted link in your default web browser.
 

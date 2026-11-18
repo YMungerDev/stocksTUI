@@ -9,9 +9,10 @@ from textual.widgets import Input, Markdown
 from textual.app import ComposeResult, on
 
 from stockstui.ui.suggesters import TickerSuggester
+from stockstui.ui.ticker_focus import TickerHeader, TickerViewMixin
 
 
-class NewsView(Vertical):
+class NewsView(TickerViewMixin, Vertical):
     """A view for displaying news articles for a selected ticker, with link navigation."""
 
     # Key bindings specific to the NewsView for navigating and opening links
@@ -22,6 +23,9 @@ class NewsView(Vertical):
         ),
         Binding("enter", "open_link", "Open Link", show=False),
     ]
+
+    ticker_attr = "news_ticker"
+    ticker_input_id = "news-ticker-input"
 
     def __init__(self, **kwargs):
         """Initializes the NewsView, setting up internal state for link management."""
@@ -42,6 +46,7 @@ class NewsView(Vertical):
         unique_suggester_data = list({t[0]: t for t in suggester_data}.values())
         suggester = TickerSuggester(unique_suggester_data, case_sensitive=False)
 
+        yield TickerHeader()
         with Horizontal(classes="news-controls"):
             yield Input(
                 placeholder="Enter ticker(s), comma-separated...",
@@ -56,6 +61,7 @@ class NewsView(Vertical):
         markdown_widget = self.query_one(Markdown)
         markdown_widget.can_focus = True
 
+        self._mark_shown()
         if self.app.news_ticker:
             if (
                 self.app._news_content_for_ticker == self.app.news_ticker
@@ -81,19 +87,25 @@ class NewsView(Vertical):
     @on(Input.Submitted, "#news-ticker-input")
     def on_news_ticker_submitted(self, event: Input.Submitted):
         """Handles submission of the ticker input, triggering news fetch."""
-        self._reset_link_focus()
+        tickers_str = self._parse_tickers_from_input(event.value or "")
+        if not tickers_str:
+            return
+        # One symbol becomes the shared ticker; a list stays news-only.
+        self._submit_ticker(tickers_str)
 
+    def _load_ticker(self) -> None:
+        """Fetches news for the app's current news ticker(s)."""
+        self._reset_link_focus()
         self.app._last_news_content = None
         self.app._news_content_for_ticker = None
-
-        if event.value:
-            markdown_widget = self.query_one(Markdown)
-            # Standardize the input string before using it.
-            tickers_str = self._parse_tickers_from_input(event.value)
-            self.app.news_ticker = tickers_str
-            markdown_widget.update("")
-            markdown_widget.loading = True
-            self.app.fetch_news(tickers_str)
+        tickers_str = self.app.news_ticker
+        if not tickers_str:
+            return
+        self._mark_shown()
+        markdown_widget = self.query_one(Markdown)
+        markdown_widget.update("")
+        markdown_widget.loading = True
+        self.app.fetch_news(tickers_str)
 
     def update_content(self, markdown: Union[str, Text], urls: list[str]) -> None:
         """Receives new news content and associated URLs, then updates the display."""
