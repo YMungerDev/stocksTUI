@@ -18,3 +18,6 @@ run.sh
 mutants/
 .mypy_cache/
 .ruff_cache/
+
+# Agent harness state
+.ori/

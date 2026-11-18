@@ -12,13 +12,32 @@
 - `feat(ui)`: Add a Calendar tab listing upcoming earnings and ex-dividend dates across visible watchlists, sorted by date (#5)
 - `feat(edgar)`: Add an SEC filings provider using EDGAR's submissions JSON — the first non-yfinance capability implementation, serving the `filings` capability through the provider registry (#10)
 - `feat(ui)`: Add a Filings tab showing recent 10-K/10-Q/8-K and other filings with form-type filter; Enter opens the filing in the browser (#10)
+- `feat(watchlist)`: Add hidden-by-default computed columns from the bar store — 1W/1M/YTD/1Y returns, distance from the 50/200-day SMA, RSI(14), 30-day volatility, relative volume and a sparkline — also shown in `-o` CLI output (#2)
+- `feat(alerts)`: Add price alerts (above/below, day move, new 52-week high/low, volume spike) that fire once per crossing, persist their state in SQLite and notify via toast and `notify-send`; `a` on a watchlist row manages them (#3)
+- `feat(fundamentals)`: Add a Fundamentals tab with annual/quarterly income statement, balance sheet and cash flow plus derived ratios (growth, margins, ROIC, FCF, net debt/EBITDA), cached daily; `-D/--fundamentals` opens it (#6)
+- `feat(history)`: Add comparison mode — several tickers rebased to 100 on common dates, `A/B` ratio series, and a correlation/beta table (#7)
+- `feat(history)`: Add toggleable chart overlays: 50/200-day SMAs, volume, drawdown from peak and earnings markers (#8)
+- `feat(research)`: Add analyst targets, recommendations, estimates, earnings surprises, insider transactions and holders to the Fundamentals tab, each block degrading independently (#9)
+- `feat(options)`: Add an options analytics strip — implied move, put/call ratios, max pain, days to expiry — and mark the expiry spanning the next earnings date (#11)
+- `feat(screening)`: Add `--filter EXPR` and `--format table|json|csv` to `-o` output, and a persistent per-tab screen expression (`t`) in the TUI (#12)
 
 ### Fixed
 - `fix(market-provider)`: Return stale cached news when yfinance fails or the ticker turns invalid, instead of surfacing a fetch error when cached news exists (#14)
 - `fix(history)`: Re-download a ticker's full stored range when a split or dividend changes adjustment factors (detected via adjusted-close divergence or new Dividends/Stock Splits rows), keeping stored ratios consistent across the whole history (#1)
 - `fix(watchlist)`: ISO date columns sort as strings (float parsing rejected them) and blank cells sort last (#5)
+- `fix(options)`: Ignore option-chain results for a ticker the user has switched away from, resolve currency from the chain's own ticker, and render NaN prices as an em dash
+- `fix(filings)`: Bind `o` on the Filings tab to open the highlighted filing (#10)
+- `fix(workers)`: Fundamentals and research fetches no longer cancel each other; the price table redisplays after the daily bar top-up
+- `fix(ui)`: Sort-mode keys (`t`, `e`, `o`, `H`, `L`) reach the watchlist and history sorts; the FRED config sub-view shows after an app rebuild
+- `fix(history)`: Ratio tickers expand correctly in comparison fetches, overlays persist across re-renders, and earnings markers fall back to the calendar cache on the offline path
+- `fix(alerts)`: 52-week rules accept an empty threshold, a blank rule type is rejected, and the table redraws only when alerts changed
+- `fix(cli)`: `--filter` with no matches skips the empty table but still renders FRED; json/csv keep their exact column set
+- `fix(cli)`: The "Fetching data..." spinner no longer writes cursor codes and frames into `--format json/csv` output on a terminal
+- `fix(market-provider)`: Serialise `schedule()`/`holidays()` calls on shared market calendars, which corrupt under concurrent use ("Length of values does not match length of index")
+- `fix(market-provider)`: Skip the event-calendar request for ETFs, indices and crypto; Yahoo's 404 made yfinance reset its crumb and fail concurrent requests with 401
 
 ### Changed
+- `refactor`: Split CLI output, watchlist view, themes and tab routing out of `main.py` (3,029 → 1,564 lines), with a declarative view registry for new tabs (#13)
 - `refactor(market-provider)`: Fetch history as raw bars plus `Adj Close` and apply adjustment ratios at display time, so stored and freshly fetched history render identically (#1)
 
 ## [0.1.0-b14] 2026-07-08
