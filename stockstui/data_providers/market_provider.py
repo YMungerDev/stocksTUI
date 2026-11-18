@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,11 @@ _news_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
 _info_cache: dict[str, dict[str, Any]] = {}
 _calendar_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _market_calendars: dict[str, Any] = {}
+# pandas_market_calendars objects are not thread-safe: concurrent schedule()
+# calls on one shared calendar corrupt its internal state and raise
+# "Length of values (N) does not match length of index (M)" (seen with XKRX).
+# Every schedule()/holidays() call on a cached calendar holds this lock.
+_market_calendar_lock = threading.RLock()
 
 # Duration for which cached news is considered fresh.
 NEWS_CACHE_DURATION_SECONDS = 300  # 5 minutes
@@ -130,9 +136,10 @@ def _calculate_info_expiry(exchange_name: str) -> datetime:
     if cal is None:
         return now + timedelta(hours=1)
     try:
-        schedule = cal.schedule(
-            start_date=now.date(), end_date=now.date() + timedelta(days=7)
-        )
+        with _market_calendar_lock:
+            schedule = cal.schedule(
+                start_date=now.date(), end_date=now.date() + timedelta(days=7)
+            )
         if not schedule.empty:
             future_opens = schedule.market_open[schedule.market_open > now]
             if not future_opens.empty:
@@ -316,25 +323,43 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
     if not tickers:
         return
 
-    def _fetch_one(ticker: str) -> tuple[str, dict | None, object | None]:
-        """Fetch info for a single ticker. Runs inside the thread pool."""
+    def _fetch_one(
+        ticker: str,
+    ) -> tuple[str, dict | None, object | None, dict[str, Any] | None]:
+        """Fetch info, fast_info and event calendar for a single ticker. Runs inside the thread pool."""
         try:
             tkr = yf.Ticker(ticker)
             # PERF: yfinance's fast_info is lazy -- each field read below can
             # fire its own HTTP request. Read them here, inside the worker, so
             # that network time is spent in parallel rather than serially in
             # the processing loop after the pool has finished.
-            return ticker, tkr.info, _materialize_fast_info(tkr.fast_info)
+            info = tkr.info
+            fast_info = _materialize_fast_info(tkr.fast_info)
         except Exception:
             logging.warning(f"Failed to fetch slow data for {ticker}")
-            return ticker, None, None
+            return ticker, None, None, None
+        return ticker, info, fast_info, _fetch_calendar_for(ticker, info)
 
-    def _fetch_calendar_one(ticker: str) -> tuple[str, dict[str, Any] | None]:
-        """Fetch the event calendar for a single ticker inside the thread pool."""
+    def _fetch_calendar_for(
+        ticker: str, info: dict | None
+    ) -> dict[str, Any] | None:
+        """
+        Fetch the event calendar, but only for equities.
+
+        Yahoo answers HTTP 404 for the calendar of ETFs, indices and crypto.
+        Besides logging an ERROR per ticker, yfinance treats any status >= 400
+        as a cookie failure and resets its shared cookie/crumb, which makes the
+        other requests in flight in this pool fail with HTTP 401 ("Invalid
+        Crumb"). Known non-equities have no events, so they get an empty dict
+        without a request; an unknown quote type still fetches.
+        """
+        quote_type = str((info or {}).get("quoteType") or "").upper()
+        if quote_type and quote_type != "EQUITY":
+            return {}
         try:
-            return ticker, get_ticker_calendar(ticker)
+            return get_ticker_calendar(ticker)
         except Exception:
-            return ticker, None
+            return None
 
     # Cap threads to avoid hammering yfinance rate-limits on very large lists.
     max_workers = min(len(tickers), 8)
@@ -342,14 +367,9 @@ def _fetch_and_cache_slow_data(tickers: list[str]):
     calendar_results: dict[str, dict[str, Any] | None] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticker = {executor.submit(_fetch_one, t): t for t in tickers}
-        calendar_futures = {
-            executor.submit(_fetch_calendar_one, t): t for t in tickers
-        }
         for future in as_completed(future_to_ticker):
-            ticker, slow_info, fast_info = future.result()
+            ticker, slow_info, fast_info, calendar = future.result()
             raw_results[ticker] = (slow_info, fast_info)
-        for future in as_completed(calendar_futures):
-            ticker, calendar = future.result()
             calendar_results[ticker] = calendar
 
     # PERF: Cache _calculate_info_expiry() per exchange so the Pandas calendar
@@ -703,10 +723,11 @@ def get_market_status(calendar_name="NYSE") -> dict:
 
     try:
         now = pd.Timestamp.now(tz=cal.tz)
-        schedule = cal.schedule(
-            start_date=now.date() - pd.Timedelta(days=1),
-            end_date=now.date() + pd.Timedelta(days=7),
-        )
+        with _market_calendar_lock:
+            schedule = cal.schedule(
+                start_date=now.date() - pd.Timedelta(days=1),
+                end_date=now.date() + pd.Timedelta(days=7),
+            )
 
         result = {
             "status": "closed",
@@ -764,7 +785,8 @@ def get_market_status(calendar_name="NYSE") -> dict:
             if now.weekday() >= 5:
                 result["reason"] = "weekend"
             else:
-                holidays_obj = cal.holidays()
+                with _market_calendar_lock:
+                    holidays_obj = cal.holidays()
                 today_date = pd.Timestamp(now.date())
                 if hasattr(holidays_obj, "holidays"):
                     holiday_list = (

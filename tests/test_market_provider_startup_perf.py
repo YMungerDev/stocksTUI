@@ -149,3 +149,101 @@ class TestExchangeCalendarMapping(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _make_typed_ticker(symbol: str, quote_type):
+    class FakeTicker:
+        def __init__(self):
+            self.info = {
+                "currency": "USD",
+                "longName": f"{symbol} Fund",
+                "exchange": "PCX",
+                "regularMarketPreviousClose": 50.0,
+            }
+            if quote_type is not None:
+                self.info["quoteType"] = quote_type
+            self.fast_info = {"lastPrice": 51.0}
+
+    return FakeTicker()
+
+
+class TestCalendarFetchOnlyForEquities(unittest.TestCase):
+    """
+    Yahoo answers 404 for the calendar of ETFs, indices and crypto, and
+    yfinance then resets its shared crumb, failing concurrent requests with 401.
+    """
+
+    def setUp(self):
+        market_provider._price_cache.clear()
+        market_provider._info_cache.clear()
+        market_provider._calendar_cache.clear()
+        market_provider._market_calendars.clear()
+
+    def _run(self, quote_types: dict) -> list:
+        fetched: list = []
+
+        def fake_calendar(ticker):
+            fetched.append(ticker)
+            return {"earnings_date": None, "ex_dividend_date": None}
+
+        with patch(
+            "stockstui.data_providers.market_provider.yf.Ticker",
+            side_effect=lambda s: _make_typed_ticker(s, quote_types[s]),
+        ), patch(
+            "stockstui.data_providers.market_provider.get_ticker_calendar",
+            side_effect=fake_calendar,
+        ):
+            market_provider._fetch_and_cache_slow_data(list(quote_types))
+        return sorted(fetched)
+
+    def test_non_equities_skip_the_calendar_request(self):
+        fetched = self._run(
+            {"SPY": "ETF", "^GSPC": "INDEX", "BTC-USD": "CRYPTOCURRENCY", "AAPL": "EQUITY"}
+        )
+        self.assertEqual(fetched, ["AAPL"])
+
+    def test_unknown_quote_type_still_fetches(self):
+        self.assertEqual(self._run({"XYZ": None}), ["XYZ"])
+
+    def test_non_equities_still_get_price_data(self):
+        self._run({"SPY": "ETF"})
+        self.assertEqual(market_provider._price_cache["SPY"]["data"]["price"], 51.0)
+
+
+class TestMarketCalendarLock(unittest.TestCase):
+    """pandas_market_calendars objects corrupt their state under concurrent schedule()."""
+
+    def test_schedule_calls_on_a_shared_calendar_never_overlap(self):
+        import time
+
+        import pandas as pd
+
+        state = {"active": 0, "max": 0}
+        guard = threading.Lock()
+
+        class FakeCalendar:
+            def schedule(self, start_date, end_date):
+                with guard:
+                    state["active"] += 1
+                    state["max"] = max(state["max"], state["active"])
+                time.sleep(0.01)
+                with guard:
+                    state["active"] -= 1
+                return pd.DataFrame()
+
+        cal = FakeCalendar()
+        with patch(
+            "stockstui.data_providers.market_provider._get_calendar", return_value=cal
+        ):
+            threads = [
+                threading.Thread(
+                    target=market_provider._calculate_info_expiry, args=("XKRX",)
+                )
+                for _ in range(8)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        self.assertEqual(state["max"], 1)
