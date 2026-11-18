@@ -691,3 +691,46 @@ Footer {
   content-align: center middle;
   margin-left: 2;
 }
+
+/* Shared ticker header on ticker views (#23). */
+.ticker-header {
+  height: 1;
+  width: 100%;
+  padding: 0 1;
+}
+
+/* Per-view help (#25). */
+HelpScreen {
+  align: center middle;
+}
+
+#help-dialog {
+  width: 90%;
+  max-width: 100;
+  height: auto;
+  max-height: 90%;
+  border: thick $primary 80%;
+  background: $surface;
+  padding: 0 1;
+}
+
+#help-title {
+  text-style: bold;
+  width: 100%;
+  padding: 0 0 1 0;
+}
+
+#help-scroll {
+  height: auto;
+  max-height: 75vh;
+}
+
+#help-hint {
+  color: $text-muted;
+  width: 100%;
+  padding: 1 0 0 0;
+}
+
+GoToTickerModal {
+  align: center middle;
+}

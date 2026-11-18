@@ -12,6 +12,7 @@ from textual.widgets import Input, Select, Static
 
 from stockstui.data_providers import edgar_provider
 from stockstui.ui.suggesters import TickerSuggester
+from stockstui.ui.ticker_focus import TickerHeader, TickerViewMixin
 from stockstui.ui.widgets.navigable_data_table import NavigableDataTable
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ def format_filing_rows(filings: list[dict[str, Any]]) -> list[tuple[Text, ...]]:
     return rows
 
 
-class FilingsView(Vertical):
+class FilingsView(TickerViewMixin, Vertical):
     """A view for displaying recent SEC filings for a selected ticker."""
 
     BINDINGS = [
@@ -51,6 +52,9 @@ class FilingsView(Vertical):
         # mode; on this tab 'o' must open the highlighted filing itself.
         Binding("o", "open_filing", "Open Filing", show=True),
     ]
+
+    ticker_attr = "filings_ticker"
+    ticker_input_id = "filings-ticker-input"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -66,6 +70,7 @@ class FilingsView(Vertical):
         unique_suggester_data = list({t[0]: t for t in suggester_data}.values())
         suggester = TickerSuggester(unique_suggester_data, case_sensitive=False)
 
+        yield TickerHeader()
         with Horizontal(classes="news-controls"):
             yield Input(
                 placeholder="Enter a ticker...",
@@ -88,6 +93,7 @@ class FilingsView(Vertical):
     def on_mount(self) -> None:
         table = self.query_one("#filings-table", NavigableDataTable)
         table.add_columns("Filed", "Form", "Period", "Description")
+        self._mark_shown()
         if self.app.filings_ticker:
             self._request_filings()
 
@@ -97,7 +103,9 @@ class FilingsView(Vertical):
         ticker = event.value.strip().upper()
         if not ticker:
             return
-        self.app.filings_ticker = ticker
+        self._submit_ticker(ticker)
+
+    def _load_ticker(self) -> None:
         self._request_filings()
 
     @on(Select.Changed, "#filings-form-select")
@@ -110,6 +118,7 @@ class FilingsView(Vertical):
         """Dispatches the EDGAR fetch on a worker thread."""
         if not self.app.filings_ticker:
             return
+        self._mark_shown()
         table = self.query_one("#filings-table", NavigableDataTable)
         table.loading = True
         self.app.fetch_filings(self.app.filings_ticker)

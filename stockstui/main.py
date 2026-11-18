@@ -16,6 +16,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import (
@@ -71,7 +72,14 @@ from stockstui.presentation.overlays import (
     rebase_to_100,
 )
 from stockstui.presentation.screening import FilterError as ScreeningFilterError
+from stockstui.ui.help_screen import GoToTickerModal, HelpScreen, help_for
 from stockstui.ui.modals import ScreenModal
+from stockstui.ui.ticker_focus import (
+    TICKER_VIEW_ATTRS,
+    TickerHistory,
+    is_single_ticker,
+    normalize_ticker,
+)
 from stockstui.ui.themes import (
     BASE_THEME_STRUCTURE,
     extract_theme_variables,
@@ -157,7 +165,10 @@ class StocksTUI(App):
         Binding("t", "screen", "Screen", show=True),
         Binding("/", "focus_search", "Search", show=True),
         Binding("f", "toggle_tag_filter", "Filter", show=True),
-        Binding("?", "toggle_help", "Toggle Help", show=True),
+        Binding("?", "toggle_help", "Help", show=True),
+        Binding(":", "goto_ticker", "Ticker", show=True),
+        Binding("<,alt+left", "ticker_back", "Prev Ticker", show=False),
+        Binding(">,alt+right", "ticker_forward", "Next Ticker", show=False),
         Binding("i", "focus_input", "Input", show=False),
         Binding("enter", "activate_tab", "Activate Tab", show=False),
         Binding("d", "handle_sort_key('d')", "Sort by Description/Date", show=False),
@@ -187,6 +198,8 @@ class StocksTUI(App):
     ]
 
     active_list_category: reactive[str | None] = reactive(None)
+    # The one ticker every ticker view follows (#23); see set_focus_ticker.
+    focus_ticker: reactive[str | None] = reactive(None)
     news_ticker: reactive[str | None] = reactive(None)
     filings_ticker: reactive[str | None] = reactive(None)
     fundamentals_ticker: reactive[str | None] = reactive(None)
@@ -238,6 +251,9 @@ class StocksTUI(App):
         self._original_status_text: Any = None
         self._last_active_category: str | None = None
         self._last_config_sub_view: str | None = None
+        self._ticker_history = TickerHistory()
+        # Ticker tab to open when ':' is used from a non-ticker tab.
+        self._last_ticker_category: str = "history"
         self._is_rebuilding = False
         self._force_config_sub_view: str | None = None
         self._pre_refresh_cursor_key: Any = None
@@ -351,23 +367,23 @@ class StocksTUI(App):
             elif cli_history := self.cli_overrides.get("history"):
                 start_category = "history"
                 if isinstance(cli_history, str):
-                    self.history_ticker = cli_history
+                    self._apply_cli_ticker("history", cli_history)
             elif cli_news := self.cli_overrides.get("news"):
                 start_category = "news"
                 if isinstance(cli_news, str):
-                    self.news_ticker = cli_news
+                    self._apply_cli_ticker("news", cli_news)
             elif cli_filings := self.cli_overrides.get("filings"):
                 start_category = "filings"
                 if isinstance(cli_filings, str):
-                    self.filings_ticker = cli_filings
+                    self._apply_cli_ticker("filings", cli_filings)
             elif cli_fundamentals := self.cli_overrides.get("fundamentals"):
                 start_category = "fundamentals"
                 if isinstance(cli_fundamentals, str):
-                    self.fundamentals_ticker = cli_fundamentals
+                    self._apply_cli_ticker("fundamentals", cli_fundamentals)
             elif cli_options := self.cli_overrides.get("options"):
                 start_category = "options"
                 if isinstance(cli_options, str):
-                    self.options_ticker = cli_options
+                    self._apply_cli_ticker("options", cli_options)
             elif self.cli_overrides.get("fred"):
                 start_category = "fred"
             elif self.cli_overrides.get("debug"):
@@ -787,10 +803,178 @@ class StocksTUI(App):
                 )
 
     def action_toggle_help(self) -> None:
-        if self.query("HelpPanel"):
-            self.action_hide_help_panel()
+        """Opens help for the current tab (#25); ? again closes it."""
+        if isinstance(self.screen, HelpScreen):
+            self.screen.dismiss(None)
+            return
+        category = self.get_active_category()
+        live_keys = [
+            (
+                key,
+                b.binding.key_display or self.get_key_display(b.binding),
+                b.binding.description,
+            )
+            for key, b in self.screen.active_bindings.items()
+            if b.enabled and b.binding.show and b.binding.description
+        ]
+        self.push_screen(
+            HelpScreen(help_for(category, is_watchlist_category(category)), live_keys)
+        )
+
+    # Actions shown and enabled only on watchlist tabs (#25).
+    _WATCHLIST_ONLY_ACTIONS = frozenset(
+        {"enter_open_mode", "screen", "manage_alerts", "refresh"}
+    )
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """
+        Hides app bindings that do nothing on the current tab, so the footer
+        matches the tab and the key falls through to the view's own binding
+        (e.g. 'o' opens a filing on Filings instead of watchlist open mode).
+        """
+        if action == "handle_sort_key":
+            return self._sort_mode
+        if action == "dismiss_or_unfocus" and isinstance(self.screen, ModalScreen):
+            # Let a modal's own Escape binding close it; the priority app
+            # binding would otherwise swallow the key.
+            if self.screen._bindings.key_to_bindings.get("escape"):
+                return False
+        if action not in self._CONTEXT_ACTIONS:
+            return True
+        category = self.get_active_category()
+        watchlist = is_watchlist_category(category)
+        if action in self._WATCHLIST_ONLY_ACTIONS:
+            return watchlist
+        if action == "enter_sort_mode":
+            return watchlist or category in ("history", "options", "fred")
+        if action == "toggle_tag_filter":
+            return watchlist or category in ("fred", "calendar")
+        if action == "focus_search":
+            spec = SPECIAL_TAB_BY_CATEGORY.get(category or "")
+            return (
+                watchlist
+                or category in ("options", "fred", "configs")
+                or bool(spec and spec.search_table_selector)
+            )
+        if action in ("ticker_back", "ticker_forward"):
+            if category not in TICKER_VIEW_ATTRS:
+                return False
+            history = self._ticker_history
+            can = history.can_go_back() if action == "ticker_back" else history.can_go_forward()
+            return True if can else None
+        return True
+
+    _CONTEXT_ACTIONS = _WATCHLIST_ONLY_ACTIONS | {
+        "enter_sort_mode",
+        "toggle_tag_filter",
+        "focus_search",
+        "ticker_back",
+        "ticker_forward",
+    }
+
+    # ----- shared selected ticker (#23) -----
+
+    def set_focus_ticker(
+        self, ticker: str | None, *, sync: bool = True, record: bool = True
+    ) -> str | None:
+        """
+        Makes `ticker` the shared ticker: every ticker view's own ticker is
+        set to it, and the active ticker view reloads unless `sync` is False
+        (the caller loads it, or a tab switch will). Returns the normalized
+        symbol, or None if `ticker` was empty.
+        """
+        symbol = normalize_ticker(ticker)
+        if not symbol:
+            return None
+        if record:
+            self._ticker_history.visit(symbol)
+        self.focus_ticker = symbol
+        for attr in TICKER_VIEW_ATTRS.values():
+            setattr(self, attr, symbol)
+        if sync:
+            self._sync_ticker_view(self.get_active_category())
+        self.refresh_bindings()
+        return symbol
+
+    def _ticker_view(self, category: str | None) -> Any | None:
+        spec = SPECIAL_TAB_BY_CATEGORY.get(category or "")
+        if category not in TICKER_VIEW_ATTRS or not spec or not spec.view_id:
+            return None
+        try:
+            return self.query_one(f"#{spec.view_id}")
+        except NoMatches:
+            return None
+
+    def _sync_ticker_view(self, category: str | None) -> None:
+        """Reloads a mounted ticker view if the shared ticker moved since it loaded."""
+        view = self._ticker_view(category)
+        if view is None:
+            return
+        if view.needs_ticker_sync():
+            view.show_ticker()
         else:
-            self.action_show_help_panel()
+            view.refresh_ticker_header()
+
+    def _apply_cli_ticker(self, category: str, value: str) -> None:
+        """A --history/--news/... symbol; lists and ratios stay view-local."""
+        if is_single_ticker(value):
+            self.set_focus_ticker(value, sync=False)
+        else:
+            setattr(self, TICKER_VIEW_ATTRS[category], value.upper())
+
+    def action_ticker_back(self) -> None:
+        if ticker := self._ticker_history.back():
+            self.set_focus_ticker(ticker, record=False)
+        else:
+            self.bell()
+
+    def action_ticker_forward(self) -> None:
+        if ticker := self._ticker_history.forward():
+            self.set_focus_ticker(ticker, record=False)
+        else:
+            self.bell()
+
+    def action_goto_ticker(self) -> None:
+        """':' — pick the shared ticker; opens a ticker view if not on one."""
+        suggestions = list(
+            {
+                s["ticker"]: (s["ticker"], s.get("note") or s.get("alias", s["ticker"]))
+                for lst in self.config.lists.values()
+                for s in lst
+                if isinstance(s, dict) and s.get("ticker")
+            }.values()
+        )
+
+        def on_result(value: str | None) -> None:
+            if not value:
+                return
+            category = self.get_active_category()
+            on_ticker_view = category in TICKER_VIEW_ATTRS
+            if not self.set_focus_ticker(value, sync=on_ticker_view):
+                return
+            if not on_ticker_view:
+                self._activate_category(self._last_ticker_category)
+
+        self.push_screen(GoToTickerModal(suggestions, self.focus_ticker), on_result)
+
+    def _activate_category(self, category: str) -> bool:
+        """Switches to `category`'s tab, else the first visible ticker tab; False if none."""
+        for i, tab in enumerate(self.tab_map, start=1):
+            if tab["category"] == category:
+                try:
+                    self.query_one(Tabs).active = f"tab-{i}"
+                    return True
+                except NoMatches:
+                    return False
+        for i, tab in enumerate(self.tab_map, start=1):
+            if tab["category"] in TICKER_VIEW_ATTRS:
+                try:
+                    self.query_one(Tabs).active = f"tab-{i}"
+                    return True
+                except NoMatches:
+                    return False
+        self.notify("No ticker tab is visible; enable one in Configs.", severity="warning")
+        return False
 
     def action_toggle_tag_filter(self) -> None:
         category = self.get_active_category()
@@ -1530,6 +1714,9 @@ class StocksTUI(App):
 
         if new_category:
             await self._display_data_for_category(new_category)
+            if new_category in TICKER_VIEW_ATTRS:
+                self._last_ticker_category = new_category
+                self._sync_ticker_view(new_category)
 
         self.action_refresh()
 
@@ -1545,13 +1732,15 @@ class StocksTUI(App):
             self._last_config_sub_view = None
 
         self._last_active_category = new_category
+        # The footer shows only the bindings that apply to this tab (#25).
+        self.refresh_bindings()
 
     @on(DataTable.RowSelected, "#price-table")
     def on_main_datatable_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.row_key.value:
-            self.news_ticker = event.row_key.value
-            self.history_ticker = event.row_key.value
-            self.notify(f"Selected {self.news_ticker} for news/history tabs.")
+            ticker = self.set_focus_ticker(event.row_key.value)
+            if ticker:
+                self.notify(f"{ticker} selected for all ticker views.")
 
     @on(DataTable.HeaderSelected, "#price-table")
     def on_price_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
@@ -1689,16 +1878,10 @@ class StocksTUI(App):
                 self.action_back_or_dismiss()
                 return
 
-            target_category = None
-            if key == "n":
-                target_category = "news"
-                self.news_ticker = ticker
-            elif key == "h":
-                target_category = "history"
-                self.history_ticker = ticker
-            elif key == "o":
-                target_category = "options"
-                self.options_ticker = ticker
+            target_category = {"n": "news", "h": "history", "o": "options"}.get(key)
+            if target_category:
+                # The tab switch below loads the view on the new ticker.
+                self.set_focus_ticker(ticker, sync=False)
             elif key == "y":
                 yahoo_url = f"https://finance.yahoo.com/quote/{ticker}"
                 try:

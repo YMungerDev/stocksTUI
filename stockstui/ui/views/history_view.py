@@ -14,6 +14,7 @@ from textual.widgets.data_table import CellDoesNotExist
 from stockstui.presentation import formatter
 from stockstui.presentation.overlays import beta_against, pairwise_correlations
 from stockstui.ui.suggesters import TickerSuggester
+from stockstui.ui.ticker_focus import TickerHeader, TickerViewMixin
 from stockstui.ui.widgets.history_chart import HistoryChart
 from stockstui.ui.widgets.vim_radio_set import VimRadioSet
 from stockstui.utils import extract_cell_text
@@ -55,7 +56,7 @@ def sort_history_table(
         )
 
 
-class HistoryView(Vertical):
+class HistoryView(TickerViewMixin, Vertical):
     """A view for displaying historical stock data, allowing selection of tickers and time ranges."""
 
     BINDINGS = [
@@ -69,6 +70,8 @@ class HistoryView(Vertical):
     ]
 
     app: Any
+    ticker_attr = "history_ticker"
+    ticker_input_id = "history-ticker-input"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -94,6 +97,7 @@ class HistoryView(Vertical):
         )  # Deduplicate by ticker
         suggester = TickerSuggester(unique_suggester_data, case_sensitive=False)
 
+        yield TickerHeader()
         # Horizontal container for ticker input
         with Horizontal(classes="history_controls"):
             yield Input(
@@ -153,6 +157,7 @@ class HistoryView(Vertical):
                         button.value = str(button.label) == target_label
 
         # Trigger data fetch if a ticker is already set (either from CLI or app state)
+        self._mark_shown()
         if self.app.history_ticker:
             self.call_after_refresh(self._request_historical_data)
         else:
@@ -307,6 +312,7 @@ class HistoryView(Vertical):
         """
         if not self.app.history_ticker:
             return
+        self._mark_shown()
         # Comparison mode: comma-separated tickers (ratio entries pass through).
         entries = [
             t.strip().upper()
@@ -403,13 +409,12 @@ class HistoryView(Vertical):
             # Multi-ticker and ratio syntax: 'NVDA,AMD' or 'NVDA/SMH'.
             entries = [part.strip() for part in raw.split(",") if part.strip()]
             if len(entries) > 1 or (len(entries) == 1 and "/" in entries[0]):
-                self.app.history_ticker = ",".join(
-                    e.upper() for e in entries
-                )
-                self._request_historical_data()
+                self._submit_ticker(",".join(e.upper() for e in entries))
                 return
-            self.app.history_ticker = self._parse_ticker_from_input(event.value)
-            self._request_historical_data()
+            self._submit_ticker(self._parse_ticker_from_input(event.value))
+
+    def _load_ticker(self) -> None:
+        self._request_historical_data()
 
     @on(VimRadioSet.Changed, "#history-range-select")
     def on_history_range_changed(self, event: VimRadioSet.Changed):

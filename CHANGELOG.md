@@ -24,6 +24,8 @@
 - `feat(fundamentals)`: Add "Valuation vs Own History" — P/E, EV/EBITDA, EV/Sales, FCF yield and P/B now, with 5/10-year medians, range and percentile, built from quarter-end TTM figures, the stored price history (backfilled to 10 years) and split-adjusted cover-page share counts
 - `feat(fundamentals)`: Add an "Earnings Quality" table — Piotroski F-score, Altman Z, Beneish M-score (8- or 5-variable), Sloan accruals, cash conversion, DSO/DIO/DPO and cash conversion cycle, capex/D&A — for the latest and prior fiscal year; banks and insurers get a note instead
 - `feat(screening)`: Add `--filter EXPR` and `--format table|json|csv` to `-o` output, and a persistent per-tab screen expression (`t`) in the TUI (#12)
+- `feat(ui)`: One shared ticker for History, News, Filings, Fundamentals and Options: Enter on a watchlist row, `:` (go to ticker) or a single symbol typed into any of them moves every view, each view shows a `AAPL · Apple · $353.78 +0.4%` header, and `<`/`>` (or Alt+Left/Right) step back and forward through recently viewed tickers. History comparisons and multi-ticker News stay local to their view (#23)
+- `feat(ui)`: The footer shows only the keys that work on the current tab — watchlist keys (open, sort, alerts, screen, filter, refresh) are hidden elsewhere, so a view's own `o` (open filing) is no longer shadowed — and `?` opens help for the current tab with what it shows and its keys (#25)
 
 ### Fixed
 - `fix(market-provider)`: Return stale cached news when yfinance fails or the ticker turns invalid, instead of surfacing a fetch error when cached news exists (#14)
@@ -46,6 +48,7 @@
 - `fix(edgar)`: Send the SEC contact email the SEC requires (new `sec_contact` setting under Configs > General, or `STOCKSTUI_SEC_CONTACT`); without one the Filings tab silently showed no filings because every request was rejected with 403. Missing contact, 403 and outages now show as an error in the tab, and an outage is no longer cached as "ticker not covered by EDGAR"
 - `fix(market-provider)`: Serialise `schedule()`/`holidays()` calls on shared market calendars, which corrupt under concurrent use ("Length of values does not match length of index")
 - `fix(market-provider)`: Skip the event-calendar request for ETFs, indices and crypto; Yahoo's 404 made yfinance reset its crumb and fail concurrent requests with 401
+- `fix(ui)`: Esc closes modals that bind it (help, go to ticker, alerts); the app's priority Esc binding used to swallow the key
 
 ### Changed
 - `refactor`: Split CLI output, watchlist view, themes and tab routing out of `main.py` (3,029 → 1,564 lines), with a declarative view registry for new tabs (#13)
