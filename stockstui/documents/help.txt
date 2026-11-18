@@ -59,6 +59,15 @@ OPTIONS
         Start on the Fundamentals tab. If TICKER is provided, statements
         and derived ratios for that symbol will be loaded.
 
+        SEC filers are read from EDGAR's XBRL company facts (needs the SEC
+        contact setting): up to 12 fiscal years and 44 quarters as filed,
+        a TTM column, valuation multiples against their own 5/10-year
+        history, and earnings-quality scores (Piotroski, Altman Z,
+        Beneish M, accruals, working-capital days). A '*' marks a value a
+        later filing restated; italics mark a derived quarter (Q4 = FY -
+        9M). 'o' opens the filing behind the highlighted row. Other
+        tickers fall back to Yahoo Finance.
+
     --debug
         Start on the Debug tab, which provides tools for testing API latency
         and cache performance.

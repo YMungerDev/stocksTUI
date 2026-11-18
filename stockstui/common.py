@@ -41,6 +41,15 @@ class FundamentalsDataUpdated(Message):
         super().__init__()
 
 
+class ValuationDataUpdated(Message):
+    """Posted when valuation multiples and their history have been computed."""
+
+    def __init__(self, ticker: str, data: dict | None) -> None:
+        self.ticker = ticker
+        self.data = data
+        super().__init__()
+
+
 class ResearchDataUpdated(Message):
     """Posted when analyst/ownership research for a ticker has been fetched."""
 

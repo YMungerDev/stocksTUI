@@ -19,6 +19,10 @@
 - `feat(history)`: Add toggleable chart overlays: 50/200-day SMAs, volume, drawdown from peak and earnings markers (#8)
 - `feat(research)`: Add analyst targets, recommendations, estimates, earnings surprises, insider transactions and holders to the Fundamentals tab, each block degrading independently (#9)
 - `feat(options)`: Add an options analytics strip — implied move, put/call ratios, max pain, days to expiry — and mark the expiry spanning the next earnings date (#11)
+- `feat(fundamentals)`: Read statements for SEC filers from EDGAR XBRL company facts — up to 12 fiscal years and 44 quarters as filed, concept changes merged per period, Q4 and quarterly cash flows derived from cumulative periods, restated values marked `*`, derived quarters in italics, `o` opens the source filing; yfinance remains the fallback for other tickers and EDGAR failures
+- `feat(fundamentals)`: Add a TTM column and more line items (cost of revenue, R&D, SG&A, diluted shares, total assets/liabilities, SBC, buybacks, dividends); values shown in millions
+- `feat(fundamentals)`: Add "Valuation vs Own History" — P/E, EV/EBITDA, EV/Sales, FCF yield and P/B now, with 5/10-year medians, range and percentile, built from quarter-end TTM figures, the stored price history (backfilled to 10 years) and split-adjusted cover-page share counts
+- `feat(fundamentals)`: Add an "Earnings Quality" table — Piotroski F-score, Altman Z, Beneish M-score (8- or 5-variable), Sloan accruals, cash conversion, DSO/DIO/DPO and cash conversion cycle, capex/D&A — for the latest and prior fiscal year; banks and insurers get a note instead
 - `feat(screening)`: Add `--filter EXPR` and `--format table|json|csv` to `-o` output, and a persistent per-tab screen expression (`t`) in the TUI (#12)
 
 ### Fixed

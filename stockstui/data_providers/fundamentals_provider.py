@@ -1,16 +1,22 @@
 """Fundamentals provider: financial statements and derived ratios (#6).
 
-Statements come from yfinance (annual and quarterly); non-US tickers
-degrade naturally to whatever yfinance provides. Statements are cached in
-SQLite as JSON keyed by ticker with a fetch timestamp and refreshed at
-most daily (after new filings).
+SEC filers are served from EDGAR's XBRL company facts (as filed, 10+ years,
+see edgar_fundamentals); everything else, and any EDGAR failure, falls back
+to yfinance (annual and quarterly). Statements are cached in SQLite as JSON
+keyed by ticker with a fetch timestamp and refreshed at most daily (after
+new filings). ``statements["meta"]["source"]`` names the provider.
 """
 
 import json
 import logging
+from datetime import date, datetime, timedelta
+from math import isnan
 from typing import Any
 
 import pandas as pd
+
+from stockstui.data_providers import edgar_fundamentals, edgar_provider
+from stockstui.data_providers.base import record_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +34,31 @@ _STATEMENT_KEYS: dict[str, str] = {
 
 def fetch_statements(ticker: str, force_refresh: bool = False) -> dict[str, Any]:
     """
-    Fetches all six statements for a ticker, returning:
+    Statements from EDGAR when the ticker files with the SEC and a contact is
+    configured, otherwise (or on any EDGAR failure) from yfinance.
+    """
+    normalized = ticker.upper()
+    if edgar_provider.has_contact():
+        try:
+            statements = edgar_fundamentals.fetch_statements(normalized)
+            if statements:
+                return statements
+        except edgar_provider.EdgarError as e:
+            logger.warning(f"EDGAR fundamentals failed for {normalized}: {e}")
+            record_outcome(
+                "fundamentals", ok=False, provider="edgar",
+                detail=f"{normalized}: {e}", fallback_used=True,
+            )
+    statements = fetch_yfinance_statements(normalized)
+    if statements:
+        statements["meta"] = {"source": "yfinance"}
+        record_outcome("fundamentals", ok=True, detail=f"{normalized}: yfinance")
+    return statements
+
+
+def fetch_yfinance_statements(ticker: str) -> dict[str, Any]:
+    """
+    Fetches all six statements for a ticker from yfinance, returning:
     {statement_key: {"columns": [ISO dates], "rows": {line_item: [values]}}}
 
     Missing statements are absent keys; the caller tolerates that.
@@ -205,3 +235,76 @@ def compute_ratios(statements: dict[str, Any]) -> dict[str, float | None]:
                 net_debt / ebitda if ebitda and ebitda != 0 else None
             )
     return out
+
+
+# Splits change rarely; one lookup per ticker per session.
+_splits_cache: dict[str, list[tuple[date, float]]] = {}
+VALUATION_HISTORY_YEARS = 10
+
+
+def get_splits(ticker: str) -> list[tuple[date, float]]:
+    """Stock splits as (date, ratio), oldest first; [] when unknown."""
+    normalized = ticker.upper()
+    if normalized in _splits_cache:
+        return _splits_cache[normalized]
+    import yfinance as yf
+
+    try:
+        series = yf.Ticker(normalized).splits
+        splits = [
+            (ts.date(), float(ratio))
+            for ts, ratio in series.items()
+            if ratio and float(ratio) > 0
+        ]
+    except Exception as e:  # noqa: BLE001 - missing splits only weaken history
+        logger.debug(f"Split lookup failed for {normalized}: {e}")
+        return []
+    _splits_cache[normalized] = splits
+    return splits
+
+
+def get_valuation(
+    ticker: str,
+    statements: dict[str, Any],
+    db_manager,
+    current_price: float | None = None,
+    today: date | None = None,
+) -> dict[str, Any] | None:
+    """
+    Current multiples and their 5/10-year history for an EDGAR-sourced
+    ticker. Returns {"unavailable": reason} when it cannot be computed.
+    Network use: one split lookup and, the first time, a 10-year bar backfill.
+    """
+    from stockstui.data_providers import market_provider
+    from stockstui.presentation import valuation
+
+    meta = statements.get("meta") or {}
+    if meta.get("source") != "edgar" or not meta.get("cover_shares"):
+        return {"unavailable": "needs SEC share counts (US filers only)"}
+    today = today or date.today()
+    start = datetime.combine(today, datetime.min.time()) - timedelta(
+        days=365 * VALUATION_HISTORY_YEARS + 30
+    )
+    market_provider.ensure_daily_history(ticker, start)
+    bars = db_manager.load_daily_bars(ticker) if db_manager is not None else pd.DataFrame()
+    if bars is None or bars.empty:
+        return {"unavailable": "no price history"}
+    price_currency = bars.attrs.get("currency") or "USD"
+    if meta.get("currency") and price_currency != meta["currency"]:
+        return {
+            "unavailable": f"statements in {meta['currency']}, price in {price_currency}"
+        }
+    closes = [
+        (ts.date(), float(close))
+        for ts, close in bars["Close"].items()
+        if close is not None and not isnan(close)
+    ]
+    splits = get_splits(ticker)
+    price = current_price if current_price else (closes[-1][1] if closes else None)
+    points = valuation.history_points(statements, closes, splits)
+    current = valuation.current_multiples(statements, price, splits)
+    return {
+        "summary": valuation.summarize(points, current, today),
+        "market_cap": (current or {}).get("market_cap"),
+        "price": price,
+    }

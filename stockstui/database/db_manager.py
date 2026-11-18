@@ -401,6 +401,22 @@ class DbManager:
             if self.conn:
                 self.conn.rollback()
 
+    def get_earliest_bar_date(self, ticker: str) -> str | None:
+        """Returns the oldest stored bar date (ISO) for a ticker, if any."""
+        if not self.conn:
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MIN(date) FROM daily_bars WHERE ticker = ?",
+                (ticker.upper(),),
+            )
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else None
+        except sqlite3.Error as e:
+            logging.error(f"Failed to read earliest bar date for {ticker}: {e}")
+            return None
+
     def get_latest_bar_date(self, ticker: str) -> str | None:
         """Returns the newest stored bar date (ISO) for a ticker, if any."""
         if not self.conn:

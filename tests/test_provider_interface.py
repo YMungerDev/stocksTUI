@@ -21,10 +21,12 @@ class TestProviderRegistry(unittest.TestCase):
         rows = {r["capability"]: r for r in provider_base.get_provider_report()}
         self.assertEqual(set(rows), set(provider_base.CAPABILITIES))
         self.assertTrue(all(r["status"] == "idle" for r in rows.values()))
-        # yfinance serves everything except filings, which EDGAR owns (#10).
+        # yfinance serves everything except filings (#10) and statements,
+        # which EDGAR owns (yfinance is the statements fallback).
         self.assertTrue(
             all(
-                r["provider"] == ("edgar" if k == "filings" else "yfinance")
+                r["provider"]
+                == ("edgar" if k in ("filings", "fundamentals") else "yfinance")
                 for k, r in rows.items()
             )
         )

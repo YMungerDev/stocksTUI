@@ -36,6 +36,7 @@ _news_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
 _info_cache: dict[str, dict[str, Any]] = {}
 _calendar_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _market_calendars: dict[str, Any] = {}
+_history_backfilled: set[str] = set()
 # pandas_market_calendars objects are not thread-safe: concurrent schedule()
 # calls on one shared calendar corrupt its internal state and raise
 # "Length of values (N) does not match length of index (M)" (seen with XKRX).
@@ -987,6 +988,33 @@ def _refetch_full_range_on_divergence(ticker: str) -> None:
     )
     frame = _download_daily_bars([ticker], datetime.strptime(earliest, "%Y-%m-%d"))
     _store_settled_bars(ticker, _extract_ticker_frame(frame, ticker))
+
+
+def ensure_daily_history(ticker: str, start_date: datetime) -> None:
+    """
+    Makes sure the bar store reaches back to start_date for one ticker.
+
+    Refresh only tops bars up forwards, so a ticker first seen recently has
+    no deep history. When the oldest stored bar is more than a week after
+    start_date, one download from start_date replaces the stored range.
+    Never raises.
+    """
+    if _db_manager is None or ticker.upper() in _history_backfilled:
+        return
+    try:
+        earliest = _db_manager.get_earliest_bar_date(ticker)
+        if earliest and datetime.strptime(earliest, "%Y-%m-%d") <= start_date + timedelta(days=7):
+            return
+        frame = _download_daily_bars([ticker], start_date)
+        sub_frame = _extract_ticker_frame(frame, ticker) if frame is not None else None
+        if sub_frame is None or sub_frame.empty:
+            return
+        _store_settled_bars(ticker, sub_frame)
+        # A ticker listed after start_date has no older bars; remembering the
+        # attempt stops a re-download every time the tab opens.
+        _history_backfilled.add(ticker.upper())
+    except Exception as e:  # noqa: BLE001 - history backfill must never break callers
+        logging.warning(f"Daily history backfill failed for {ticker}: {e}")
 
 
 def refresh_daily_bars(tickers: list[str], start_date: datetime) -> None:

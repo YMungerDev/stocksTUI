@@ -50,6 +50,7 @@ from stockstui.common import (
     ResearchDataUpdated,
     TickerDebugDataUpdated,
     TickerInfoComparisonUpdated,
+    ValuationDataUpdated,
 )
 from stockstui.config_manager import ConfigManager
 from stockstui.data_providers import (
@@ -1020,12 +1021,26 @@ class StocksTUI(App):
         """Fetches financial statements for a ticker (cached in SQLite)."""
         try:
             statements = fundamentals_provider.get_statements(ticker, self.db_manager)
-            if not get_current_worker().is_cancelled:
-                self.post_message(FundamentalsDataUpdated(ticker, statements))
+            if get_current_worker().is_cancelled:
+                return
+            self.post_message(FundamentalsDataUpdated(ticker, statements))
         except Exception as e:  # noqa: BLE001
             logger.error(f"Worker fetch_fundamentals failed for {ticker}: {e}")
             if not get_current_worker().is_cancelled:
                 self.post_message(FundamentalsDataUpdated(ticker, {}))
+            return
+        # Valuation follows separately: the first visit backfills ten years
+        # of daily bars, which should not hold back the statements.
+        try:
+            cached = market_provider.get_cached_price(ticker) or {}
+            valuation_data = fundamentals_provider.get_valuation(
+                ticker, statements, self.db_manager, current_price=cached.get("price")
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Valuation failed for {ticker}: {e}")
+            valuation_data = {"unavailable": "valuation failed (see log)"}
+        if not get_current_worker().is_cancelled:
+            self.post_message(ValuationDataUpdated(ticker, valuation_data))
 
     @work(exclusive=True, group="research", thread=True)
     def fetch_research(self, ticker: str) -> None:
@@ -1368,6 +1383,18 @@ class StocksTUI(App):
             return
         try:
             self.query_one(FundamentalsView).update_statements(message.data or {})
+        except NoMatches:
+            pass
+
+    @on(ValuationDataUpdated)
+    async def on_valuation_data_updated(self, message: ValuationDataUpdated) -> None:
+        if (
+            self.get_active_category() != "fundamentals"
+            or self.fundamentals_ticker != message.ticker
+        ):
+            return
+        try:
+            self.query_one(FundamentalsView).update_valuation(message.data or {})
         except NoMatches:
             pass
 
