@@ -517,7 +517,8 @@ class TestFundamentalsViewDepth(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.pause()
             table = view.query_one("#quality-table", NavigableDataTable)
-            self.assertIn("banks", str(table.get_row_at(0)[0]))
+            self.assertEqual(table.row_count, 0)
+            self.assertIn("banks", str(view.query_one("#quality-note").render()))
 
 
 if __name__ == "__main__":

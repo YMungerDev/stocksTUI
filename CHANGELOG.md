@@ -37,6 +37,12 @@
 - `fix(alerts)`: 52-week rules accept an empty threshold, a blank rule type is rejected, and the table redraws only when alerts changed
 - `fix(cli)`: `--filter` with no matches skips the empty table but still renders FRED; json/csv keep their exact column set
 - `fix(cli)`: The "Fetching data..." spinner no longer writes cursor codes and frames into `--format json/csv` output on a terminal
+- `fix(ui)`: Ticker inputs no longer push the selectors beside them off-screen at narrow widths (Fundamentals Annual/Quarterly, Filings form filter, Options expiry and Chart button) (#22)
+- `fix(options)`: Days to expiration reads 0, not -1, on expiry day; the analytics strip uses the chain's own ticker for its currency (#22)
+- `fix(fundamentals)`: A yfinance payload cached before EDGAR was usable is refetched instead of hiding SEC data for up to a day (#22)
+- `fix(ui)`: Empty, error and unavailable messages show above their table instead of as a row that widened the first column (#22)
+- `fix(filings)`: Show the filing date and the reporting period as separate columns (#22)
+- `fix(history)`: The period selector's cursor starts on the selected period, and the chart/table switch is labelled (#22)
 - `fix(edgar)`: Send the SEC contact email the SEC requires (new `sec_contact` setting under Configs > General, or `STOCKSTUI_SEC_CONTACT`); without one the Filings tab silently showed no filings because every request was rejected with 403. Missing contact, 403 and outages now show as an error in the tab, and an outage is no longer cached as "ticker not covered by EDGAR"
 - `fix(market-provider)`: Serialise `schedule()`/`holidays()` calls on shared market calendars, which corrupt under concurrent use ("Length of values does not match length of index")
 - `fix(market-provider)`: Skip the event-calendar request for ETFs, indices and crypto; Yahoo's 404 made yfinance reset its crumb and fail concurrent requests with 401

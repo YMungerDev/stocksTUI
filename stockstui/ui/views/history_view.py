@@ -8,7 +8,7 @@ from textual.app import ComposeResult, on
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.dom import NoMatches
-from textual.widgets import DataTable, Input, RadioButton, Static, Switch
+from textual.widgets import DataTable, Input, Label, RadioButton, Static, Switch
 from textual.widgets.data_table import CellDoesNotExist
 
 from stockstui.presentation import formatter
@@ -116,9 +116,10 @@ class HistoryView(Vertical):
                 RadioButton("All"),
                 id="history-range-select",  # Radio buttons for selecting historical period
             )
-            yield Switch(
-                id="history-view-toggle"
-            )  # Toggle between table and chart view
+            # Off = table, on = chart. Labelled because a bare switch gave no
+            # hint what it toggled (#22).
+            yield Label("Chart", id="history-view-toggle-label")
+            yield Switch(id="history-view-toggle")
         # Container to display the historical data (table or chart)
         yield Container(id="history-display-container")
 

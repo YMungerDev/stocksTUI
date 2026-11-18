@@ -8,7 +8,7 @@ from rich.text import Text
 from textual.app import ComposeResult, on
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, Select
+from textual.widgets import Input, Select, Static
 
 from stockstui.data_providers import edgar_provider
 from stockstui.ui.suggesters import TickerSuggester
@@ -18,16 +18,24 @@ logger = logging.getLogger(__name__)
 
 
 def format_filing_rows(filings: list[dict[str, Any]]) -> list[tuple[Text, ...]]:
-    """Formats EDGAR filings into DataTable rows: date, form, description."""
+    """
+    Formats EDGAR filings into DataTable rows: filed, form, period, description.
+
+    The list is ordered by filing date, so that is the date shown first. The
+    period a report covers is a separate column; mixing the two made a 10-K
+    for the period ending 09-26 sit among November filings (#22).
+    """
     rows: list[tuple[Text, ...]] = []
     for filing in filings:
-        report_date = filing.get("report_date") or filing.get("filing_date") or ""
+        filed = filing.get("filing_date") or ""
+        period = filing.get("report_date") or ""
         form = filing.get("form") or "?"
         description = filing.get("description") or ""
         rows.append(
             (
-                Text(report_date),
+                Text(filed),
                 Text(form, style="bold"),
+                Text(period or "—", style="" if period else "dim"),
                 Text(description if description else "—"),
             )
         )
@@ -74,11 +82,12 @@ class FilingsView(Vertical):
                 id="filings-form-select",
                 allow_blank=True,
             )
+        yield Static("", id="filings-note", classes="table-note")
         yield NavigableDataTable(id="filings-table", zebra_stripes=True)
 
     def on_mount(self) -> None:
         table = self.query_one("#filings-table", NavigableDataTable)
-        table.add_columns("Date", "Form", "Description")
+        table.add_columns("Filed", "Form", "Period", "Description")
         if self.app.filings_ticker:
             self._request_filings()
 
@@ -122,14 +131,21 @@ class FilingsView(Vertical):
                 self._filings, self._category
             )
             error = getattr(self, "_error", None)
+            note = self.query_one("#filings-note", Static)
+            # Messages sit above the table, not in it (#22).
             if error and not visible:
-                table.add_row(Text(error, style="red"))
-                return
-            if not visible:
-                table.add_row(
-                    "[dim]No SEC filings found for this ticker."
-                    " Non-US listings are not covered by EDGAR.[/dim]"
+                message = Text(error, style="red")
+            elif not visible:
+                message = Text(
+                    "No SEC filings found for this ticker."
+                    " Non-US listings are not covered by EDGAR.",
+                    style="dim",
                 )
+            else:
+                message = None
+            note.update(message or "")
+            note.display = message is not None
+            if message is not None:
                 return
             for row in format_filing_rows(visible):
                 table.add_row(*row)

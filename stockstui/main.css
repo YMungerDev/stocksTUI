@@ -660,3 +660,34 @@ Footer {
   color: $accent;
   text-style: bold;
 }
+/* Control rows: the ticker input shares its row with selectors and buttons.
+   An Input defaults to the full width, which pushed the selectors off-screen
+   at the scratchpad size (#22). */
+.news-controls > Input,
+.options_controls > Input {
+  width: 1fr;
+  min-width: 16;
+}
+
+.news-controls > Select,
+.options_controls > Select {
+  width: 30;
+}
+
+.options_controls > Button {
+  width: auto;
+  min-width: 10;
+}
+
+/* Messages shown above a table instead of inside it (#22). */
+.table-note {
+  height: auto;
+  padding: 0 1;
+  display: none;
+}
+
+#history-view-toggle-label {
+  height: 3;
+  content-align: center middle;
+  margin-left: 2;
+}

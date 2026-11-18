@@ -38,11 +38,15 @@ def fetch_statements(ticker: str, force_refresh: bool = False) -> dict[str, Any]
     configured, otherwise (or on any EDGAR failure) from yfinance.
     """
     normalized = ticker.upper()
+    # True once EDGAR answered that it has nothing for this ticker; an EDGAR
+    # error leaves it False so the next visit tries EDGAR again.
+    edgar_checked = False
     if edgar_provider.has_contact():
         try:
             statements = edgar_fundamentals.fetch_statements(normalized)
             if statements:
                 return statements
+            edgar_checked = True
         except edgar_provider.EdgarError as e:
             logger.warning(f"EDGAR fundamentals failed for {normalized}: {e}")
             record_outcome(
@@ -51,7 +55,7 @@ def fetch_statements(ticker: str, force_refresh: bool = False) -> dict[str, Any]
             )
     statements = fetch_yfinance_statements(normalized)
     if statements:
-        statements["meta"] = {"source": "yfinance"}
+        statements["meta"] = {"source": "yfinance", "edgar_checked": edgar_checked}
         record_outcome("fundamentals", ok=True, detail=f"{normalized}: yfinance")
     return statements
 
@@ -125,7 +129,7 @@ def get_statements(
     normalized = ticker.upper()
     if not force_refresh:
         cached = load_cached_statements(db_manager, normalized)
-        if cached:
+        if cached and _cache_still_preferred(cached):
             return cached
     statements = fetch_statements(normalized, force_refresh=force_refresh)
     if statements and db_manager is not None:
@@ -133,6 +137,21 @@ def get_statements(
             normalized, json.dumps({"statements": statements})
         )
     return statements or {}
+
+
+def _cache_still_preferred(cached: dict[str, Any]) -> bool:
+    """
+    A cached yfinance payload is reused only if EDGAR could not have served
+    the ticker: no SEC contact is set, or EDGAR already said it has nothing.
+    Otherwise a payload cached before the contact was set (or during an EDGAR
+    outage) would hide the SEC data for up to a day (#22).
+    """
+    meta = cached.get("meta") or {}
+    if meta.get("source") == "edgar":
+        return True
+    if not edgar_provider.has_contact():
+        return True
+    return bool(meta.get("edgar_checked"))
 
 
 def _row(payload: dict[str, Any], *names: str) -> list | None:

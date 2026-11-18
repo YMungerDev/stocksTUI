@@ -17,3 +17,18 @@ class VimRadioSet(RadioSet):
             "up,left,h", "previous_button", "Previous option", show=False
         ),  # Move to the previous radio button
     ]
+
+    def on_mount(self) -> None:
+        """
+        Puts the cursor on the pressed button.
+
+        Textual's RadioSet always puts its cursor on the first button when it
+        mounts, so a set opening on '1M' showed the '1D' highlight as well
+        (#22). Runs after the base class has finished mounting.
+        """
+        self.call_after_refresh(self.sync_cursor_to_pressed)
+
+    def sync_cursor_to_pressed(self) -> None:
+        if self.pressed_index >= 0:
+            self._selected = self.pressed_index
+

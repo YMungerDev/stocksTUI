@@ -309,12 +309,16 @@ class FundamentalsView(Vertical):
             )
         yield Static("", id="fundamentals-source")
         yield NavigableDataTable(id="fundamentals-ratio-table", zebra_stripes=True)
+        yield Static("", id="fundamentals-note", classes="table-note")
         yield NavigableDataTable(id="fundamentals-table", zebra_stripes=True)
         yield Static("Valuation vs Own History", classes="content-header")
+        yield Static("", id="valuation-note", classes="table-note")
         yield NavigableDataTable(id="valuation-table", zebra_stripes=True)
         yield Static("Earnings Quality", classes="content-header")
+        yield Static("", id="quality-note", classes="table-note")
         yield NavigableDataTable(id="quality-table", zebra_stripes=True)
         yield Static("Analyst & Ownership Research", classes="content-header")
+        yield Static("", id="research-note", classes="table-note")
         yield NavigableDataTable(id="research-table", zebra_stripes=True)
 
     def on_mount(self) -> None:
@@ -348,6 +352,15 @@ class FundamentalsView(Vertical):
             self._render_statements(self._statements)
         elif event.value:
             self._request_statements()
+
+    def _set_note(self, note_id: str, message: str | None) -> None:
+        """
+        Shows a message above a table, or hides it. Messages never go into
+        the table itself, where they would widen the first column (#22).
+        """
+        note = self.query_one(f"#{note_id}", Static)
+        note.update(message or "")
+        note.display = bool(message)
 
     def _request_statements(self) -> None:
         if not self.app.fundamentals_ticker:
@@ -393,9 +406,11 @@ class FundamentalsView(Vertical):
             table.loading = False
             table.clear()
             reason = self._valuation.get("unavailable")
-            if reason:
-                table.add_row(Text(f"Valuation history unavailable: {reason}", style="dim"))
-            else:
+            self._set_note(
+                "valuation-note",
+                f"Valuation history unavailable: {reason}" if reason else None,
+            )
+            if not reason:
                 for row in format_valuation_rows(self._valuation):
                     table.add_row(*row)
             self._render_quality()
@@ -405,15 +420,14 @@ class FundamentalsView(Vertical):
     def _render_quality(self) -> None:
         table = self.query_one("#quality-table", NavigableDataTable)
         table.clear()
+        self._set_note("quality-note", None)
         if not self._statements.get("income"):
             return
         if looks_like_financial(self._statements):
-            table.add_row(
-                Text(
-                    "Quality scores are not meaningful for banks and insurers"
-                    " (no current assets or gross profit).",
-                    style="dim",
-                )
+            self._set_note(
+                "quality-note",
+                "Quality scores are not meaningful for banks and insurers"
+                " (no current assets or gross profit).",
             )
             return
         for row in format_quality_rows(self._statements, self._valuation.get("market_cap")):
@@ -425,14 +439,15 @@ class FundamentalsView(Vertical):
             table.loading = False
             table.clear(columns=True)
             self._row_sources = []
+            self._set_note("fundamentals-note", None)
 
             quarterly = self._is_quarterly()
             suffix = "_q" if quarterly and statements.get("income_q") else ""
             payload = statements.get("income" + suffix)
             if not payload:
-                table.add_row(
-                    "[dim]No statement data for this ticker."
-                    " Non-US listings may be limited.[/dim]"
+                self._set_note(
+                    "fundamentals-note",
+                    "No statement data for this ticker. Non-US listings may be limited.",
                 )
                 return
             source = (statements.get("meta") or {}).get("source", "yfinance")
@@ -499,10 +514,11 @@ class FundamentalsView(Vertical):
             table.loading = False
             table.clear()
             rows = format_research_rows(research)
+            self._set_note(
+                "research-note",
+                None if rows else "No analyst/ownership data for this ticker.",
+            )
             if not rows:
-                table.add_row(
-                    Text("No analyst/ownership data for this ticker.", style="dim")
-                )
                 return
             for block, detail in rows:
                 table.add_row(Text(block, style="bold"), Text(detail))

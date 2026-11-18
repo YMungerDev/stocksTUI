@@ -254,7 +254,7 @@ class TestFormFiltering(unittest.TestCase):
 
     def test_format_rows_handles_missing_description(self):
         rows = format_filing_rows([{"form": "10-K", "filing_date": "2026-01-01"}])
-        self.assertEqual(rows[0][2].plain, "—")
+        self.assertEqual(rows[0][3].plain, "—")
 
 
 class TestFilingsView(unittest.IsolatedAsyncioTestCase):
@@ -308,7 +308,11 @@ class TestFilingsView(unittest.IsolatedAsyncioTestCase):
             view = app.query_one(FilingsView)
             view.update_filings([])
             table = view.query_one("#filings-table", DataTable)
-            self.assertEqual(table.row_count, 1)
+            # The empty state is a note above the table, not a fake row (#22).
+            self.assertEqual(table.row_count, 0)
+            note = view.query_one("#filings-note")
+            self.assertTrue(note.display)
+            self.assertIn("No SEC filings", str(note.render()))
 
     async def test_submitting_ticker_dispatches_fetch(self):
         class FilingsHostApp(App):
@@ -413,7 +417,8 @@ class TestFilingsViewErrors(unittest.IsolatedAsyncioTestCase):
             view = app.query_one(FilingsView)
             view.update_filings(None, edgar_provider.CONTACT_MISSING_MESSAGE)
             table = view.query_one("#filings-table", DataTable)
-            text = str(table.get_row_at(0)[0])
+            self.assertEqual(table.row_count, 0)
+            text = str(view.query_one("#filings-note").render())
             self.assertIn("SEC Contact", text)
             self.assertNotIn("Non-US", text)
 

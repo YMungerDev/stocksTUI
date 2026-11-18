@@ -1,5 +1,4 @@
 import math
-from datetime import datetime
 
 from rich.text import Text
 from textual.app import ComposeResult, on
@@ -157,13 +156,12 @@ class OptionsView(Vertical):
             currency_code = info.get("currency", "USD") if info else "USD"
             sym = get_currency_symbol(currency_code)
 
-            # Calculate days to expiration
-            try:
-                expiration_str = last_data.get("expiration", "")
-                exp_date = datetime.strptime(expiration_str, "%Y-%m-%d")
-                days_to_exp = (exp_date - datetime.now()).days
-            except Exception:
-                days_to_exp = None
+            # Calendar days to expiration, the same figure as the summary
+            # strip. Subtracting datetimes gave -1 on expiry day (#22).
+            expiration_str = last_data.get("expiration", "")
+            days_to_exp = (
+                analytics.days_until(expiration_str) if expiration_str else None
+            )
 
             # Create info header
             info_text = f"Underlying: {sym}{underlying_price:.2f}"
@@ -376,10 +374,10 @@ class OptionsView(Vertical):
             )
             ratios = analytics.put_call_ratios(calls_df, puts_df)
             pain = analytics.max_pain(calls_df, puts_df)
+            # Currency of the chain's own ticker, as in the chain render.
+            chain_ticker = last_data.get("ticker") or self.app.options_ticker
             info = (
-                market_provider.get_ticker_info(self.app.options_ticker)
-                if self.app.options_ticker
-                else None
+                market_provider.get_ticker_info(chain_ticker) if chain_ticker else None
             )
             sym = get_currency_symbol(info.get("currency", "USD") if info else "USD")
 
